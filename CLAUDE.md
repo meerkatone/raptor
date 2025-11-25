@@ -21,8 +21,31 @@ Dangerous operations (apply patches, delete, git push): ASK FIRST.
 
 /scan /fuzz /web /agentic /codeql /analyze - Security testing
 /exploit /patch - Generate PoCs and fixes (beta)
-/crash-analysis - Autonomous crash root-cause analysis
+/crash-analysis - Autonomous crash root-cause analysis (see below)
 /create-skill - Save approaches (alpha)
+
+---
+
+## CRASH ANALYSIS
+
+The `/crash-analysis` command provides autonomous root-cause analysis for C/C++ crashes.
+
+**Usage:** `/crash-analysis <bug-tracker-url> <git-repo-url>`
+
+**Agents:**
+- `crash-analysis-agent` - Main orchestrator
+- `crash-analyzer-agent` - Deep root-cause analysis using rr traces
+- `crash-analyzer-checker-agent` - Validates analysis rigorously
+- `function-trace-generator-agent` - Creates function execution traces
+- `coverage-analysis-generator-agent` - Generates gcov coverage data
+
+**Skills** (in `.claude/skills/crash-analysis/`):
+- `rr-debugger` - Deterministic record-replay debugging
+- `function-tracing` - Function instrumentation with -finstrument-functions
+- `gcov-coverage` - Code coverage collection
+- `line-execution-checker` - Fast line execution queries
+
+**Requirements:** rr, gcc/clang (with ASAN), gdb, gcov
 
 ---
 
