@@ -1,13 +1,13 @@
 """
-GitHub Forensics Evidence Creation Functions
+GitHub Forensics Evidence Creation Functions (OSINT)
 
-Factory functions for creating verified evidence objects.
+Factory functions for creating verified evidence objects from public sources.
 Consumer provides identifiers + source, we look up and verify independently.
 
-Sources:
-- GHArchive: BigQuery for Events (immutable)
-- GitHub: REST API for Observations
-- Wayback: CDX API for archived Observations
+All sources are public - no authentication required:
+- GHArchive: BigQuery for Events (immutable, free 1TB/month)
+- GitHub: REST API for Observations (60 req/hr unauthenticated)
+- Wayback: CDX API for archived Observations (public)
 - Git: Local git commands for Events
 """
 
@@ -208,12 +208,15 @@ class SourceClient(Protocol):
 
 
 class GitHubClient:
-    """Client for GitHub REST API."""
+    """Client for GitHub REST API (unauthenticated OSINT).
+
+    Rate limits: 60 requests/hour unauthenticated.
+    All public repository data is accessible without authentication.
+    """
 
     BASE_URL = "https://api.github.com"
 
-    def __init__(self, token: str | None = None):
-        self.token = token
+    def __init__(self):
         self._session: Any = None
 
     @property
@@ -225,10 +228,7 @@ class GitHubClient:
             import requests
 
             self._session = requests.Session()
-            headers = {"Accept": "application/vnd.github+json"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
-            self._session.headers.update(headers)
+            self._session.headers.update({"Accept": "application/vnd.github+json"})
         return self._session
 
     def get_commit(self, owner: str, repo: str, sha: str) -> dict[str, Any]:
@@ -1277,25 +1277,29 @@ def create_ioc(
 
 
 class EvidenceFactory:
-    """Factory for creating verified evidence objects."""
+    """Factory for creating verified OSINT evidence objects.
+
+    All data sources are public and require no authentication:
+    - GitHub API: Public repos, commits, issues, PRs (60 req/hr)
+    - Wayback Machine: Archived web pages
+    - GH Archive: BigQuery (requires GCP project, free tier: 1TB/month)
+    """
 
     def __init__(
         self,
-        github_token: str | None = None,
         gharchive_credentials: str | None = None,
         gharchive_project: str | None = None,
     ):
         self._github_client: GitHubClient | None = None
         self._wayback_client: WaybackClient | None = None
         self._gharchive_client: GHArchiveClient | None = None
-        self._github_token = github_token
         self._gharchive_credentials = gharchive_credentials
         self._gharchive_project = gharchive_project
 
     @property
     def github(self) -> GitHubClient:
         if self._github_client is None:
-            self._github_client = GitHubClient(token=self._github_token)
+            self._github_client = GitHubClient()
         return self._github_client
 
     @property
