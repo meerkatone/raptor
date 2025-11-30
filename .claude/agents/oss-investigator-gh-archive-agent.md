@@ -52,6 +52,8 @@ Based on targets, build BigQuery queries for relevant event types:
 
 Use the BigQuery Python client as shown in the skill.
 
+#### Option A: Using GHArchiveCollector (Recommended for single-hour queries)
+
 For each query result, create evidence using `GHArchiveCollector`:
 ```python
 from src.collectors import GHArchiveCollector
@@ -68,6 +70,37 @@ events = collector.collect_events(
 store.add_all(events)
 store.save(f"{workdir}/evidence.json")
 ```
+
+#### Option B: Custom BigQuery Queries (For bulk/multi-table queries)
+
+When running custom queries across multiple tables (e.g., UNION across years), you MUST track which table each event came from:
+
+```python
+from src.parsers import parse_gharchive_event
+from src import EvidenceStore
+
+store = EvidenceStore.load(f"{workdir}/evidence.json")
+
+# Example: Query multiple year tables
+for year in range(2020, 2025):
+    table = f"githubarchive.year.{year}"
+    query = f"""
+    SELECT *
+    FROM `{table}`
+    WHERE type = 'CreateEvent'
+      AND repo.name LIKE '%pattern%'
+    """
+
+    results = client.query(query)
+    for row in results:
+        # CRITICAL: Pass the table name to the parser
+        event = parse_gharchive_event(dict(row), table=table)
+        store.add(event)
+
+store.save(f"{workdir}/evidence.json")
+```
+
+**IMPORTANT:** Always pass `table=` parameter to `parse_gharchive_event()` when running custom queries. This ensures proper verification metadata. Without it, verification will fail.
 
 ### 4. Key Investigation Patterns
 
