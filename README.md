@@ -159,7 +159,7 @@ gcc, g++, clang-format, make, cmake, autotools
 gdb, gdb-multiarch, binutils
 ```
 
-Web testing:
+Web testing - STUB, treat as alpha:
 ```
 Playwright browser automation (Chromium, Firefox, Webkit browsers)
 ```
@@ -195,7 +195,7 @@ docker build -f .devcontainer/Dockerfile -t raptor-devcontainer:latest .
 ```
 /scan     - Static code analysis (Semgrep + CodeQL)
 /fuzz     - Binary fuzzing with AFL++
-/web      - Web application security testing
+/web      - Web application security testing (STUB - treat as alpha)
 /agentic  - Full autonomous workflow (analysis + exploit/patch generation)
 /codeql   - CodeQL-only deep analysis with dataflow
 /analyze  - LLM analysis only (no exploit/patch generation - 50% faster & cheaper)
