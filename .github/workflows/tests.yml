@@ -109,6 +109,8 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
+    permissions:
+     actions: write
     needs: [python-unit-tests, test-workflows, test-fast, test-real, test-comprehensive, test-integration]
     if: always()
     steps:
