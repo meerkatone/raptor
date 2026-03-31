@@ -1,3 +1,8 @@
+---
+name: code-understanding-teach
+description: Explains unfamiliar code, frameworks, or patterns in depth, focusing on security properties and failure conditions, and returns a clear security verdict to resume interrupted analysis.
+---
+
 # [TEACH] Code Explanation Mode
 
 Explain unfamiliar code, frameworks, or patterns in enough depth to reason about their security properties. Used when the analyst hits something they don't understand well enough to attack correctly.

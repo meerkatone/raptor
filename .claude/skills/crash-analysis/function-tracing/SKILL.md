@@ -1,6 +1,6 @@
 ---
 name: Function Call Tracing
-description: Instrument C/C++ with -finstrument-functions for execution tracing and Perfetto visualization
+description: Instrument C/C++ with -finstrument-functions for execution tracing and Perfetto visualisation
 version: 1.0
 author: Claude
 tags:

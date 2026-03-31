@@ -1,3 +1,8 @@
+---
+name: code-understanding-hunt
+description: Systematically finds all instances of a vulnerability pattern across the codebase, classifying each match by taint status and grouping by root cause to determine fix scope.
+---
+
 # [HUNT] Variant Analysis
 
 Once a vulnerability pattern is identified, I need you to systematically find every other location in the codebase where the same pattern could apply. A single finding is rarely isolated. Don't be scared, be curious

@@ -1,3 +1,8 @@
+---
+name: code-understanding-map
+description: Builds a ground-truth model of a codebase's entry points, trust boundaries, and dangerous sinks from an attacker's perspective, producing context-map.json for pipeline integration.
+---
+
 # [MAP] Application Context Mapping
 
 Build a ground-truth model of the target codebase before attacking it. The goal is to understand the application's trust model, where input enters, where decisions get made, and where dangerous operations occur.
