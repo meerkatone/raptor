@@ -15,7 +15,6 @@ from core.sarif.parser import (
 )
 
 from core.git import clone_repository
-from core.exec import run
 from core.hash import sha256_tree
 
 __all__ = [
