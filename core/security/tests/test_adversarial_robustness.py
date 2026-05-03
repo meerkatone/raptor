@@ -375,7 +375,7 @@ class TestAutofetchBypassAttempts:
             untrusted_blocks=(UntrustedBlock(content=payload, kind="src", origin="f"),),
         )
         user = bundle.messages[1].content
-        assert "github.com" in user
+        assert "https://github.com/user/repo" in user 
 
     def test_null_byte_in_tag_name_does_not_bypass(self):
         """Browsers ignore null bytes: <im\\x00g> renders as <img>."""
