@@ -111,7 +111,7 @@ def test_run_pass_emits_all_six_artifacts(tmp_path, monkeypatch):
     result = runner.invoke(app, [
         "run", "CVE-2024-99001",
         "--output-dir", str(out),
-        "--disk-limit-pct", "99.9",
+        "--disk-limit", "99.9",
         "--quiet",  # suppress the API-key banner so output is deterministic
     ])
     assert result.exit_code == 0, result.output
@@ -138,7 +138,7 @@ def test_run_unsupported_exits_4(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, [
         "run", "CVE-2024-99002",
         "--output-dir", str(out),
-        "--disk-limit-pct", "99.9",
+        "--disk-limit", "99.9",
         "--quiet",
     ])
     assert result.exit_code == 4
@@ -157,7 +157,7 @@ def test_run_no_evidence_exits_5(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, [
         "run", "CVE-2024-99003",
         "--output-dir", str(out),
-        "--disk-limit-pct", "99.9",
+        "--disk-limit", "99.9",
         "--quiet",
     ])
     assert result.exit_code == 5
@@ -182,7 +182,7 @@ def test_run_writes_flow_md_with_pipeline_trace(tmp_path, monkeypatch):
     CliRunner().invoke(app, [
         "run", "CVE-2024-99004",
         "--output-dir", str(out),
-        "--disk-limit-pct", "99.9",
+        "--disk-limit", "99.9",
         "--quiet",
     ])
     flow_md = (out / "CVE-2024-99004.flow.md").read_text()
@@ -213,7 +213,7 @@ def test_run_prints_flow_md_to_stdout_by_default(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, [
         "run", "CVE-2024-99005",
         "--output-dir", str(out),
-        "--disk-limit-pct", "99.9",
+        "--disk-limit", "99.9",
         # NOTE: no --quiet — the report should be printed.
     ])
     assert result.exit_code == 0, result.output
@@ -242,7 +242,7 @@ def test_run_quiet_suppresses_flow_md_on_stdout(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, [
         "run", "CVE-2024-99006",
         "--output-dir", str(out),
-        "--disk-limit-pct", "99.9",
+        "--disk-limit", "99.9",
         "--quiet",
     ])
     assert result.exit_code == 0, result.output
