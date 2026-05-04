@@ -14,7 +14,7 @@ Writes:
   examples per verdict
 
 Usage:
-    .venv/bin/python -m tools.oracle.cross_check \\
+    .venv/bin/python -m cve_diff.oracle.cross_check \\
         --summary /tmp/bench200/summary.json \\
         --output-dir /tmp/bench200/oracle/
 """
@@ -22,14 +22,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
-from tools.oracle import nvd_oracle, osv_oracle
-from tools.oracle.types import OracleVerdict, Verdict
+from core.http.urllib_backend import UrllibClient
+from packages.nvd import NvdClient
+from packages.nvd.verify import verify as _nvd_verify
+from packages.osv import OsvClient
+from packages.osv.verdicts import OracleVerdict, Verdict
+from packages.osv.verify import verify as _osv_verify
+
+
+@functools.lru_cache(maxsize=1)
+def _osv_client() -> OsvClient:
+    return OsvClient(http=UrllibClient(user_agent="cve-diff-cross-check/0.1"))
+
+
+@functools.lru_cache(maxsize=1)
+def _nvd_client() -> NvdClient:
+    return NvdClient()
 
 _GH_COMMIT_URL = re.compile(
     r"https?://github\.com/([^/]+/[^/#?\s.]+)/commit/([a-f0-9]{7,40})",
@@ -71,10 +86,10 @@ def _load_pick_from_osv_file(summary_dir: Path, cve_id: str) -> tuple[str, str]:
 
 def _verify_one(cve_id: str, picked_slug: str, picked_sha: str) -> OracleVerdict:
     """Ask OSV; if ORPHAN, fall back to NVD."""
-    v = osv_oracle.verify(cve_id, picked_slug, picked_sha)
+    v = _osv_verify(cve_id, picked_slug, picked_sha, client=_osv_client())
     if v.verdict != Verdict.ORPHAN:
         return v
-    nv = nvd_oracle.verify(cve_id, picked_slug, picked_sha)
+    nv = _nvd_verify(cve_id, picked_slug, picked_sha, client=_nvd_client())
     if nv.verdict != Verdict.ORPHAN:
         return nv
     # Both orphans — return the first with combined note.
