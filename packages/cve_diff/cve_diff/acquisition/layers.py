@@ -89,6 +89,10 @@ def _clean_dest(dest: Path) -> None:
         raise ValueError(f"_clean_dest refusing dangerous path: {dest!r}")
     if dest.is_symlink():
         raise ValueError(f"_clean_dest refusing symlink: {dest!r}")
+    # `iterdir()` raises NotADirectoryError on regular files. Refuse
+    # explicitly so the error is structured rather than opaque.
+    if dest.exists() and not dest.is_dir():
+        raise ValueError(f"_clean_dest refusing non-directory: {dest!r}")
     if dest.exists() and any(dest.iterdir()):
         subprocess.run(
             ["rm", "-rf", str(dest)],
