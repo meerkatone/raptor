@@ -354,8 +354,14 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
 
             ctx = lib.seccomp_init(_SCMP_ACT_ALLOW)
             if not ctx:
-                _os_write(2, b"RAPTOR: seccomp_init failed\n")
-                return
+                # Fail-closed: was a bare `return`, which let the child
+                # exec with NO seccomp filter despite the operator
+                # asking for one. Match the policy at seccomp_load:
+                # a security layer that the operator requested but
+                # failed to install MUST NOT silently degrade.
+                _os_write(2, b"RAPTOR: seccomp_init failed -- "
+                             b"refusing to exec without filter\n")
+                os._exit(126)
             try:
                 # Explicitly set BADARCH = KILL_PROCESS. Current libseccomp
                 # (2.5.x) defaults to KILL_PROCESS, but we've relied on
