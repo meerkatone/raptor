@@ -79,11 +79,18 @@ def _redact_url(match: re.Match[str]) -> str:
     except ValueError:
         return raw_url
 
-    if not parsed.scheme or not parsed.netloc:
+    # Don't bail when netloc is empty — schemeless or netloc-less inputs
+    # (`/api?token=secret`, `data:...`, custom schemes) still carry
+    # secrets in the query string. Pre-fix, the early return skipped
+    # query/fragment redaction entirely for any URL the caller passed
+    # us that didn't match the http(s)://host shape exactly. The
+    # public regex guards http/https today, but that's defence-in-depth
+    # against future callers passing matches from a wider regex.
+    if not parsed.scheme and not parsed.netloc and not parsed.query and not parsed.fragment:
         return raw_url
 
     netloc = parsed.netloc
-    if "@" in netloc:
+    if netloc and "@" in netloc:
         userinfo, host = netloc.rsplit("@", 1)
         if ":" in userinfo:
             username, _password = userinfo.split(":", 1)
