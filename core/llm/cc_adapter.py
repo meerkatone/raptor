@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.security.redaction import redact_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,7 +92,12 @@ def parse_cc_structured(
     """
     content = stdout.strip()
     if not content:
-        stderr_excerpt = (stderr or "")[:500]
+        # Redact stderr before embedding into the error message —
+        # CC subprocess stderr can carry API keys (Anthropic SDK's
+        # verbose output shows the bearer header), URL-embedded
+        # credentials, AWS keys, etc. The error string is propagated
+        # up to logs and reports that may be shared.
+        stderr_excerpt = redact_secrets((stderr or "")[:500])
         return {"finding_id": finding_id, "error": f"empty output: {stderr_excerpt}"}
 
     try:
@@ -129,7 +136,13 @@ def parse_cc_structured(
     except (ValueError, json.JSONDecodeError):
         pass
 
-    return {"finding_id": finding_id, "error": f"unparseable output: {content[:200]}"}
+    # Same redaction rationale as the empty-output path above —
+    # `content` here may include partial CC envelope text from a
+    # broken response that streamed Authorization headers / API keys.
+    return {
+        "finding_id": finding_id,
+        "error": f"unparseable output: {redact_secrets(content[:200])}",
+    }
 
 
 def parse_cc_freeform(stdout: str, stderr: str = "") -> dict[str, Any]:
@@ -139,7 +152,10 @@ def parse_cc_freeform(stdout: str, stderr: str = "") -> dict[str, Any]:
     """
     content = stdout.strip()
     if not content:
-        return {"content": "", "error": f"empty output: {(stderr or '')[:500]}"}
+        return {
+            "content": "",
+            "error": f"empty output: {redact_secrets((stderr or '')[:500])}",
+        }
 
     try:
         envelope = json.loads(content)
