@@ -37,6 +37,13 @@ except ImportError:
 
 logger = get_logger()
 
+# After this many consecutive cache write failures, auto-disable
+# caching for the rest of the run. Tuned for "transient blip vs
+# durable problem" — three retries lets a momentary EBUSY recover,
+# but a real disk-full / read-only-FS / permission flip stops
+# spamming the log after a few thousand subsequent writes.
+_CACHE_WRITE_FAILURE_THRESHOLD = 3
+
 
 def _sanitize_log_message(msg: str) -> str:
     """
@@ -272,6 +279,12 @@ class LLMClient:
                 self.config.enable_caching = False
                 logger.warning(f"Cannot create cache dir {self.config.cache_dir} — caching disabled")
 
+        # Consecutive cache-write failure counter. Auto-disable
+        # caching after `_CACHE_WRITE_FAILURE_THRESHOLD` in a row to
+        # stop log-spamming when the cache dir runs out of space /
+        # permission flips / filesystem goes read-only mid-run.
+        self._cache_write_failures = 0
+
         logger.info("LLM Client initialized")
         if self.config.primary_model:
             logger.info(f"Primary model: {self.config.primary_model.provider}/{self.config.primary_model.model_name}")
@@ -429,8 +442,25 @@ class LLMClient:
                     "tokens_used": response.tokens_used,
                     "timestamp": time.time(),
                 }, mode=0o600)
+            # Reset failure counter on a successful write — recovery
+            # from a transient EBUSY shouldn't carry the strike count
+            # forward.
+            self._cache_write_failures = 0
         except Exception as e:
-            logger.warning(f"Cache write error: {e}")
+            self._cache_write_failures += 1
+            if self._cache_write_failures >= _CACHE_WRITE_FAILURE_THRESHOLD:
+                # Persistent problem (disk full, read-only FS,
+                # permission flip mid-run). Stop spamming the log
+                # and stop attempting subsequent writes.
+                self.config.enable_caching = False
+                logger.warning(
+                    f"Cache write error #{self._cache_write_failures}: {e}. "
+                    f"Caching disabled for the remainder of this run."
+                )
+            else:
+                logger.warning(
+                    f"Cache write error #{self._cache_write_failures}: {e}"
+                )
             return
         self._maybe_evict_cache()
 
@@ -535,7 +565,17 @@ class LLMClient:
                 "timestamp": time.time(),
             })
         except Exception as e:
-            logger.warning(f"Structured cache write error: {e}")
+            self._cache_write_failures += 1
+            if self._cache_write_failures >= _CACHE_WRITE_FAILURE_THRESHOLD:
+                self.config.enable_caching = False
+                logger.warning(
+                    f"Structured cache write error #{self._cache_write_failures}: {e}. "
+                    f"Caching disabled for the remainder of this run."
+                )
+            else:
+                logger.warning(
+                    f"Structured cache write error #{self._cache_write_failures}: {e}"
+                )
             return
         self._maybe_evict_cache()
 
