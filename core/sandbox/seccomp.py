@@ -66,7 +66,17 @@ _AUDIT_EXTRA_TRACE_SYSCALLS = (
 
 
 # libseccomp comparison ops (scmp_compare)
-_SCMP_CMP_EQ = 4  # equal to
+_SCMP_CMP_EQ = 4         # equal to: arg == datum_a
+_SCMP_CMP_MASKED_EQ = 7  # masked equal: (arg & datum_a) == datum_b
+
+# Linux extracts the socket type from the (type | flags) arg with this
+# mask (linux/socket.h SOCK_TYPE_MASK). Without it, exact-equality rules
+# on `arg=1` for `SOCK_DGRAM` (2) miss the very common
+# `SOCK_DGRAM | SOCK_CLOEXEC` (524290 = 0x80002) and
+# `SOCK_DGRAM | SOCK_NONBLOCK` (2050 = 0x802) variants. Same for
+# SOCK_RAW (3). Use SCMP_CMP_MASKED_EQ with this mask so the rule matches
+# regardless of the flag bits.
+_SOCK_TYPE_MASK = 0xf
 
 
 class _ScmpArgCmp(ctypes.Structure):
@@ -386,15 +396,18 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                             _os_write(2, b"RAPTOR: seccomp socket family rule failed\n")
 
                     # socket() with SOCK_RAW — argument 1 is type (with optional
-                    # SOCK_NONBLOCK/CLOEXEC bits). We only match SOCK_RAW exactly;
-                    # the common `SOCK_RAW | SOCK_CLOEXEC` pattern slips through.
-                    # Raw sockets also require CAP_NET_RAW on the host which the
-                    # sandbox doesn't grant, so this is belt-and-braces. Lives
-                    # alongside the other socket() rules (was previously nested
-                    # inside the ioctl block by accident — it depends on
-                    # socket_num, not ioctl_num).
-                    arg = _ScmpArgCmp(arg=1, op=_SCMP_CMP_EQ,
-                                      datum_a=socket_type_block, datum_b=0)
+                    # SOCK_NONBLOCK/CLOEXEC bits). Use MASKED_EQ with the
+                    # kernel's SOCK_TYPE_MASK (0xf) so the rule matches the
+                    # bare `SOCK_RAW` and also `SOCK_RAW | SOCK_CLOEXEC` /
+                    # `SOCK_RAW | SOCK_NONBLOCK`. Raw sockets also require
+                    # CAP_NET_RAW on the host which the sandbox doesn't grant,
+                    # so this is belt-and-braces. Lives alongside the other
+                    # socket() rules (was previously nested inside the ioctl
+                    # block by accident — it depends on socket_num, not
+                    # ioctl_num).
+                    arg = _ScmpArgCmp(arg=1, op=_SCMP_CMP_MASKED_EQ,
+                                      datum_a=_SOCK_TYPE_MASK,
+                                      datum_b=socket_type_block)
                     arg_arr = (_ScmpArgCmp * 1)(arg)
                     ret = lib.seccomp_rule_add_array(
                         ctx, deny, socket_num, 1, arg_arr,
@@ -412,11 +425,17 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                 # are already blocked above regardless of type).
                 if block_udp and socket_num >= 0:
                     for fam in (_AF_INET, _AF_INET6):
+                        # arg 1 is type | flags (SOCK_CLOEXEC / SOCK_NONBLOCK).
+                        # Use MASKED_EQ with SOCK_TYPE_MASK (0xf) so
+                        # `SOCK_DGRAM | SOCK_CLOEXEC` (524290) and
+                        # `SOCK_DGRAM | SOCK_NONBLOCK` (2050) both match the
+                        # block — exact equality misses both common variants.
                         args = (_ScmpArgCmp * 2)(
                             _ScmpArgCmp(arg=0, op=_SCMP_CMP_EQ,
                                         datum_a=fam, datum_b=0),
-                            _ScmpArgCmp(arg=1, op=_SCMP_CMP_EQ,
-                                        datum_a=_SOCK_DGRAM, datum_b=0),
+                            _ScmpArgCmp(arg=1, op=_SCMP_CMP_MASKED_EQ,
+                                        datum_a=_SOCK_TYPE_MASK,
+                                        datum_b=_SOCK_DGRAM),
                         )
                         ret = lib.seccomp_rule_add_array(
                             ctx, deny, socket_num, 2, args,
