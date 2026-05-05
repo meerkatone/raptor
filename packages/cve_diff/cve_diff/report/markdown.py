@@ -502,10 +502,42 @@ def _commit_url(repository_url: str, sha: str) -> str:
     return f"{base}/commit/{sha}"
 
 
+def _md_safe(s: str) -> str:
+    """Escape characters that break markdown link/inline-code rendering.
+
+    `(`/`)` close link targets; backticks close inline-code; angle
+    brackets are interpreted as autolinks. Renderer-supplied URLs and
+    repo names should pass through this before landing in `[txt](url)`
+    or `` `txt` `` constructs.
+    """
+    return (
+        str(s)
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("(", "%28")
+        .replace(")", "%29")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _neutralize_diff_fence(diff_text: str) -> str:
+    """Insert zero-width space inside fence-closing backtick runs.
+
+    A diff that contains ```` ``` ```` somewhere closes the surrounding
+    ```` ```diff ```` block early and turns the rest of the diff into
+    raw markdown — link/image injection from upstream commit content.
+    Inserting U+200B between any three consecutive backticks defangs the
+    fence without changing the visible characters in monospace render.
+    """
+    return diff_text.replace("```", "`​`​`")
+
+
 def render(bundle: DiffBundle, root_cause: RootCause | None = None) -> str:
     repo = bundle.repo_ref.repository_url
-    fix_url = _commit_url(repo, bundle.commit_after)
-    intro_url = _commit_url(repo, bundle.commit_before)
+    fix_url = _md_safe(_commit_url(repo, bundle.commit_after))
+    intro_url = _md_safe(_commit_url(repo, bundle.commit_before))
+    repo_safe = _md_safe(repo)
 
     diff_body = bundle.diff_text
     truncated_note = ""
@@ -532,7 +564,7 @@ def render(bundle: DiffBundle, root_cause: RootCause | None = None) -> str:
 
     return (
         f"# {bundle.cve_id}\n\n"
-        f"**Repository:** {repo}\n\n"
+        f"**Repository:** {repo_safe}\n\n"
         f"**Introduced:** [`{bundle.commit_before}`]({intro_url})\n\n"
         f"**Fixed:** [`{bundle.commit_after}`]({fix_url})\n\n"
         f"**Files changed:** {bundle.files_changed}  \n"
@@ -545,7 +577,7 @@ def render(bundle: DiffBundle, root_cause: RootCause | None = None) -> str:
         f"{files_block}"
         f"## Diff\n\n"
         f"```diff\n"
-        f"{diff_body}\n"
+        f"{_neutralize_diff_fence(diff_body)}\n"
         f"```"
         f"{truncated_note}\n"
     )
