@@ -37,6 +37,40 @@ from .tool_use.types import (
 
 logger = get_logger()
 
+
+def _safe_float(value: Any, *, default: float) -> float:
+    """`float(value)` with all error paths collapsed to `default`.
+
+    The CC subprocess envelope nominally returns numeric `cost_usd` /
+    `_tokens`, but a future CC change or an upstream parser bug could
+    surface a string like `"1.23abc"`, `"NaN"`, `True`, `None`, or
+    even a dict. Pre-fix `float(parsed.get("cost_usd") or 0.0)`
+    raised ValueError on the non-numeric-string case mid-stack and
+    aborted the entire turn. Track the failure in debug logs so a
+    real upstream regression is visible without crashing the run.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.debug("CC envelope: non-numeric cost/tokens value %r — using %r",
+                     value, default)
+        return default
+
+
+def _safe_int(value: Any, *, default: int) -> int:
+    """Same as `_safe_float` for int conversion."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.debug("CC envelope: non-int tokens value %r — using %r",
+                     value, default)
+        return default
+
+
 # SDK availability flags (canonical source is detection.py)
 from .detection import OPENAI_SDK_AVAILABLE, ANTHROPIC_SDK_AVAILABLE, GENAI_SDK_AVAILABLE
 
@@ -2072,8 +2106,8 @@ class ClaudeCodeLLMProvider(LLMProvider):
 
         parsed = parse_cc_freeform(proc.stdout, proc.stderr)
         content = parsed.get("content", "") or ""
-        cost = float(parsed.get("cost_usd", 0.0) or 0.0)
-        tokens = int(parsed.get("_tokens", 0) or 0)
+        cost = _safe_float(parsed.get("cost_usd"), default=0.0)
+        tokens = _safe_int(parsed.get("_tokens"), default=0)
 
         # Best-effort token split: cc_adapter only surfaces total tokens;
         # if the envelope had separate input/output we'd carry them, but
@@ -2151,8 +2185,8 @@ class ClaudeCodeLLMProvider(LLMProvider):
         # Track usage so structured calls show up alongside generate() in
         # provider stats. cost/_tokens are set by extract_envelope_metadata
         # inside parse_cc_structured when the envelope carries them.
-        cost = float(result.pop("cost_usd", 0.0) or 0.0)
-        tokens = int(result.pop("_tokens", 0) or 0)
+        cost = _safe_float(result.pop("cost_usd", None), default=0.0)
+        tokens = _safe_int(result.pop("_tokens", None), default=0)
         result.pop("duration_seconds", None)
         result.pop("analysed_by", None)
         # parse_cc_structured injects ``finding_id`` (default "unknown")
