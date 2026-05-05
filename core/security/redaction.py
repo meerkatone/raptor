@@ -6,6 +6,37 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
+# Vendor-published credential shapes. Each entry is a (vendor, regex)
+# tuple — the vendor label is documentation only; only the compiled
+# regex is used. Anchored on prefix-length-shape rather than just prefix
+# so a bare prefix in prose ("OpenAI's sk- format") doesn't false-match.
+_VENDOR_SECRET_PATTERNS = (
+    # AWS access key ID (AKIA*) and secret-access-key context.
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    # AWS temporary credentials (ASIA*).
+    re.compile(r"\bASIA[0-9A-Z]{16}\b"),
+    # GitHub personal access tokens / fine-grained / app tokens.
+    # ghp_ / gho_ / ghu_ / ghs_ / ghr_ + 36-char alnum body.
+    re.compile(r"\bgh[opusr]_[A-Za-z0-9]{36}\b"),
+    # GitHub fine-grained PAT (github_pat_ + 22-char prefix + _ + 59-char body).
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"),
+    # Slack tokens: xoxa-/xoxb-/xoxp-/xoxr-/xoxs-/xoxo- + version + body.
+    re.compile(r"\bxox[abporst]-[0-9A-Za-z-]{10,}\b"),
+    # OpenAI API key: `sk-` prefix + 48 alphanumeric chars (legacy)
+    # OR `sk-proj-` + ≥40 chars (project-scoped, current).
+    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}\b"),
+    # Anthropic API key: `sk-ant-` + 95+ chars.
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{90,}\b"),
+    # JSON Web Token: 3 base64url segments separated by dots. Strict
+    # length floor on the body to avoid matching short dotted alphanum
+    # tokens (e.g. `a.b.c` in source code).
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+    # Google API key: `AIza` + 35 chars.
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    # Stripe live secret key.
+    re.compile(r"\bsk_live_[0-9A-Za-z]{24,}\b"),
+)
+
 _SECRET_QUERY_KEYS = {
     "api_key",
     "apikey",
@@ -88,6 +119,15 @@ def redact_secrets(value: object, *, reveal_secrets: bool = False) -> str:
         text,
         flags=re.IGNORECASE,
     )
+
+    # Vendor-specific credential patterns. Each matches the canonical
+    # token shape published by the vendor; substring-only false positives
+    # are acceptable here because the redaction target is shareable
+    # logs / artifacts where false-positive redaction is far cheaper than
+    # a credential leak. Order doesn't matter — patterns are mutually
+    # disjoint by prefix.
+    for pattern in _VENDOR_SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
     return text
 
 
