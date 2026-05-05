@@ -173,7 +173,8 @@ class OSVDiscoverer:
                 introduced_shas = [
                     e["introduced"]
                     for e in rng.events
-                    if e.get("introduced") and e["introduced"] != "0"
+                    if isinstance(e.get("introduced"), str)
+                    and e["introduced"] != "0"
                     and _COMMIT_SHA_RE.fullmatch(e["introduced"])
                 ]
                 for event in rng.events:
