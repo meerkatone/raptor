@@ -86,9 +86,17 @@ def validate_response(
     validation failure) so the caller's fallback path is uniform.
     """
     strict = _strict_clone(schema)
+    # Catch TypeError alongside ValidationError. `model_validate_json`
+    # raises TypeError on older Pydantic v2 (< 2.12) when the input
+    # isn't str/bytes/bytearray; 2.12+ converted that to a
+    # ValidationError, but the contract here is "never raises" and
+    # the older behaviour is still in the field. A caller-supplied
+    # thunk returning, say, an `Optional[str]` instead of a str could
+    # also feed None / int into this path. Same fail-uniform handling
+    # for both branches.
     try:
         return strict.model_validate_json(raw)
-    except ValidationError:
+    except (ValidationError, TypeError):
         pass
 
     if llm_call is None:
@@ -101,5 +109,5 @@ def validate_response(
 
     try:
         return strict.model_validate_json(retry)
-    except ValidationError:
+    except (ValidationError, TypeError):
         return None
