@@ -980,12 +980,23 @@ class EgressProxy:
         total = {"c2u": 0, "u2c": 0}  # byte counters
         result = "allowed"
         reason: Optional[str] = None
+        # `asyncio.wait_for` is the correct primitive for "cap this block
+        # at N seconds": it raises `asyncio.TimeoutError` when the deadline
+        # fires AND cancels the inner coroutine cleanly. The previous
+        # `_TunnelGuard(loop.call_later(t, task.cancel))` design raised
+        # `asyncio.CancelledError` on timeout, not TimeoutError — so the
+        # explicit `except asyncio.TimeoutError` branch below never fired,
+        # and on Python 3.11+ the CancelledError (a BaseException) escaped
+        # `except Exception` entirely, leaving the timeout completely
+        # unaccounted for in the proxy event ring buffer.
         try:
-            async with _TunnelGuard(self._total_timeout):
-                await asyncio.gather(
+            await asyncio.wait_for(
+                asyncio.gather(
                     self._relay(reader, up_writer, "c2u", total),
                     self._relay(up_reader, writer, "u2c", total),
-                )
+                ),
+                timeout=self._total_timeout,
+            )
         except asyncio.TimeoutError:
             result = "timed_out"
             reason = f"exceeded total_timeout={self._total_timeout}s"
@@ -1046,27 +1057,6 @@ class EgressProxy:
             await writer.drain()
         except Exception:
             pass
-
-
-class _TunnelGuard:
-    """Async context manager that cancels the block after total_timeout."""
-
-    def __init__(self, timeout: float):
-        self._timeout = timeout
-        self._task: Optional[asyncio.Task] = None
-
-    async def __aenter__(self):
-        self._task = asyncio.current_task()
-        # asyncio.get_event_loop() is deprecated outside coroutines and
-        # warns noisily in Python 3.12+; get_running_loop() is the
-        # current idiom for code that's known to run inside a task.
-        self._handle = asyncio.get_running_loop().call_later(
-            self._timeout,
-            lambda: self._task.cancel() if self._task else None,
-        )
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self._handle.cancel()
 
 
 async def _read_line(reader: asyncio.StreamReader, max_len: int) -> Optional[str]:
