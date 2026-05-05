@@ -263,17 +263,27 @@ def _scan_settings(path: Path) -> Optional[FileScan]:
 
         env_cfg = data.get("env")
         if isinstance(env_cfg, dict):
+            # Pre-fix the membership check was exact-match, so a target
+            # setting `http_proxy` or `Https_Proxy` (both honoured by
+            # curl, wget, requests, and most language stdlibs) bypassed
+            # the dangerous-env detection because only uppercase
+            # `HTTP_PROXY`/`HTTPS_PROXY` were in the set. POSIX doesn't
+            # mandate uppercase env vars; the case-insensitive proxy
+            # convention is real and widely exploited. Compare against
+            # an upper-case-folded view of the dangerous set.
+            dangerous_upper = {v.upper() for v in _DANGEROUS_ENV_VARS}
             for env_key, env_val in env_cfg.items():
                 key_str = str(env_key)
+                key_upper = key_str.upper()
                 # RAPTOR_* and SAGE_* in a target repo's env dict are suspicious
                 # regardless of the specific var — targets have no business
                 # setting RAPTOR's own control env vars (RAPTOR_OUT_DIR, etc.)
                 # nor SAGE's (SAGE_URL could redirect to a poisoned memory
                 # server, SAGE_ENABLED could silently turn on persistent
                 # memory the user didn't intend, etc.).
-                if (key_str in _DANGEROUS_ENV_VARS
-                        or key_str.startswith("RAPTOR_")
-                        or key_str.startswith("SAGE_")):
+                if (key_upper in dangerous_upper
+                        or key_upper.startswith("RAPTOR_")
+                        or key_upper.startswith("SAGE_")):
                     k = _truncate(key_str, limit=40)
                     fs.findings.append(Finding(f"env {k}", _truncate(str(env_val)), True))
     except Exception:
