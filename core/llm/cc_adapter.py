@@ -165,8 +165,27 @@ def parse_cc_freeform(stdout: str, stderr: str = "") -> dict[str, Any]:
             # in-band failure; without this check, "" content would surface
             # as if it were a successful empty response. parse_cc_structured
             # already checks this — keep behaviour symmetric here.
-            if envelope.get("is_error") is True or envelope.get("error"):
-                parsed["error"] = envelope.get("error") or "claude -p reported is_error=true"
+            #
+            # `is True` covers the canonical bool. We also accept string
+            # `"true"` / `"True"` because some upstream JSON serialisers
+            # / fixture builders coerce bool to string. The error-string
+            # check rejects the literal `"false"` / `"none"` / `"null"`
+            # which are truthy by Python's bool() but semantically empty
+            # — `if envelope.get("error")` alone fired for `error: "false"`
+            # on responses that were actually fine.
+            err_field = envelope.get("error")
+            if isinstance(err_field, str) and err_field.strip().lower() in (
+                "false", "none", "null", "0", "",
+            ):
+                err_field = None
+            is_error_flag = envelope.get("is_error")
+            is_error = (
+                is_error_flag is True
+                or (isinstance(is_error_flag, str)
+                    and is_error_flag.strip().lower() == "true")
+            )
+            if is_error or err_field:
+                parsed["error"] = err_field or "claude -p reported is_error=true"
             extract_envelope_metadata(envelope, parsed)
             return parsed
     except json.JSONDecodeError:
