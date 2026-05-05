@@ -117,4 +117,9 @@ class CommitResolver:
         if result.returncode != 0:
             return False
         roots = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-        return sha in roots
+        # `rev-list` always returns full 40-char SHAs; the caller may pass
+        # a 7-char short SHA. Match either way so the empty-tree fallback
+        # fires even when only a short SHA is available (e.g. CVE-2024-3094
+        # cited via 7-char short).
+        sha_lc = sha.lower()
+        return any(r.lower().startswith(sha_lc) or sha_lc.startswith(r.lower()) for r in roots)
