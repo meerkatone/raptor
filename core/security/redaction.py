@@ -83,7 +83,26 @@ def _redact_url(match: re.Match[str]) -> str:
         f"{quote(key, safe='[]')}={quote(value, safe='[]/')}" for key, value in redacted_pairs
     )
 
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+    # OAuth 2.0 implicit-flow puts `access_token` / `id_token` in the
+    # URL fragment, not the query string (so the token never crosses
+    # the wire to the resource server). Pre-fix the fragment was
+    # passed through verbatim — leaking the very tokens the spec uses
+    # the fragment to protect from server logs. Apply the same
+    # secret-key redaction to fragment params.
+    fragment = parsed.fragment
+    if fragment and "=" in fragment:
+        fragment_pairs = parse_qsl(fragment, keep_blank_values=True)
+        if fragment_pairs:
+            fragment_pairs = [
+                (key, "[REDACTED]" if key.lower() in _SECRET_QUERY_KEYS else value)
+                for key, value in fragment_pairs
+            ]
+            fragment = "&".join(
+                f"{quote(key, safe='[]')}={quote(value, safe='[]/')}"
+                for key, value in fragment_pairs
+            )
+
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, fragment))
 
 
 def redact_secrets(value: object, *, reveal_secrets: bool = False) -> str:
