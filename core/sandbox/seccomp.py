@@ -454,6 +454,16 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                 # what we do). Rejects AF_INET/AF_INET6 + SOCK_DGRAM.
                 # Allows UDP for other families (AF_UNIX/NETLINK etc.
                 # are already blocked above regardless of type).
+                if block_udp and socket_num < 0:
+                    # Fail-closed: caller asked for proxy-mode UDP block
+                    # but we can't install the rule (socket() syscall
+                    # unresolved on this arch). Silently skipping would
+                    # let DNS/UDP exfil through despite the operator
+                    # selecting the hardened mode.
+                    _os_write(2, b"RAPTOR: seccomp block_udp requested but "
+                                 b"socket() syscall unresolved -- refusing to "
+                                 b"exec without UDP filter\n")
+                    os._exit(126)
                 if block_udp and socket_num >= 0:
                     for fam in (_AF_INET, _AF_INET6):
                         # arg 1 is type | flags (SOCK_CLOEXEC / SOCK_NONBLOCK).
