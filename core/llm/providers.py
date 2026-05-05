@@ -1187,8 +1187,12 @@ def _message_to_openai_wire(m: Message) -> list[Dict[str, Any]]:
     on ``StopReason.ERROR``) emit ``{"role": "assistant",
     "content": ""}`` — most OpenAI-compatible backends reject an
     assistant message with neither ``content`` nor ``tool_calls``,
-    so the empty-string is the safe wire form. Empty user turns are
-    skipped (the message has nothing to convey).
+    so the empty-string is the safe wire form.
+
+    Genuinely-empty user turns (no text, no tool results) symmetrically
+    emit ``{"role": "user", "content": ""}``. Pre-fix this returned
+    `[]` — most backends rejected the request as malformed (the
+    next assistant turn followed an absent user turn).
 
     User turns carrying both text and tool_results emit the tool
     messages first, then a trailing ``role:"user"`` text message —
@@ -1232,6 +1236,15 @@ def _message_to_openai_wire(m: Message) -> list[Dict[str, Any]]:
             })
     if text_parts:
         out_msgs.append({"role": "user", "content": "".join(text_parts)})
+    elif not out_msgs:
+        # Genuinely empty user message — no text, no tool results.
+        # Pre-fix returned `[]`, which produced a wire-shape with no
+        # message for this turn at all. Most OpenAI-compat backends
+        # then reject the request as malformed (assistant turn
+        # without prior user). Symmetric with the assistant-role
+        # branch above which also emits `{"content": ""}` for the
+        # genuinely-empty case.
+        out_msgs.append({"role": "user", "content": ""})
     return out_msgs
 
 
