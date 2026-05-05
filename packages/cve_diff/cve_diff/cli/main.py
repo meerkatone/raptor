@@ -26,10 +26,11 @@ from typing import Annotated
 import typer
 
 from cve_diff import __version__
-from cve_diff.analysis.analyzer import AnalysisError, RootCauseAnalyzer
+from cve_diff.analysis.analyzer import RootCauseAnalysisError, RootCauseAnalyzer
 from cve_diff.cli.bench import bench as _bench_cmd
 from cve_diff.core.exceptions import (
     AcquisitionError,
+    AnalysisError,
     DiscoveryError,
     IdenticalCommitsError,
     UnsupportedSource,
@@ -411,7 +412,7 @@ def run(
                     f"root cause: {rc.cwe_id} ({rc.vulnerability_type}) "
                     f"conf={rc.confidence:.2f} tokens={rc.input_tokens}+{rc.output_tokens}"
                 )
-            except (AnalysisError, LLMCallFailed) as exc:
+            except (RootCauseAnalysisError, LLMCallFailed) as exc:
                 typer.echo(f"root-cause analysis failed: {exc}", err=True)
                 raise typer.Exit(code=9) from exc
 
