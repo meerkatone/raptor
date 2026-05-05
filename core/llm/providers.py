@@ -1299,7 +1299,15 @@ class AnthropicProvider(LLMProvider):
                 raise RuntimeError("Anthropic returned empty content")
             first_block = response.content[0]
             if not hasattr(first_block, 'text'):
-                raise RuntimeError(f"Anthropic returned non-text content block: {first_block.type}")
+                # `getattr` with default — pre-fix `first_block.type`
+                # raised AttributeError mid-error-formatting if the
+                # block lacked BOTH `text` AND `type` (a future SDK
+                # shape change or unexpected response variant). The
+                # AttributeError replaced the informative
+                # "non-text content" message with a confusing
+                # internal-state crash.
+                block_type = getattr(first_block, 'type', '<unknown>')
+                raise RuntimeError(f"Anthropic returned non-text content block: {block_type}")
             content = first_block.text
             finish_reason = response.stop_reason or "complete"
 
