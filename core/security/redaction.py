@@ -51,6 +51,24 @@ _SECRET_QUERY_KEYS = {
     "session_token",
     "service_token",
     "token",
+    # Common-but-missed names. `password` shows up in legacy URL forms
+    # like `https://example.com/api?username=u&password=p`. `sig` is the
+    # HMAC signature in many provider URL schemes (signed S3 URLs use
+    # `Signature`, plain `sig` covers Slack / Twilio / etc.). The
+    # `x-amz-*` family covers AWS SigV4 presigned URLs which carry the
+    # signature in the query string.
+    "password",
+    "passwd",
+    "pwd",
+    "sig",
+    "signature",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "x-goog-signature",
+    "auth",
+    "authorization",
+    "private_key",
 }
 
 
