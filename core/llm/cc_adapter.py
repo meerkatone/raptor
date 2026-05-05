@@ -67,17 +67,29 @@ def strip_json_fences(text: str) -> str:
 
 
 def extract_envelope_metadata(envelope: dict, into: dict) -> None:
-    """Extract cost, duration, model, and token counts from a ``claude -p`` JSON envelope."""
-    if envelope.get("total_cost_usd"):
-        into["cost_usd"] = envelope["total_cost_usd"]
-    if envelope.get("duration_ms"):
-        into["duration_seconds"] = round(envelope["duration_ms"] / 1000, 1)
+    """Extract cost, duration, model, and token counts from a ``claude -p`` JSON envelope.
+
+    Use explicit `is not None` / `in envelope` checks rather than
+    truthiness — a legitimate zero (a cached call costing 0 USD, a
+    sub-millisecond cache hit reporting 0 ms duration, a no-token
+    response) should still be recorded faithfully. Pre-fix, the
+    `if envelope.get(X):` pattern silently dropped zero values, so
+    cost/token telemetry under-reported any "free" calls and the
+    operator's spend-tracking was systematically biased.
+    """
+    cost = envelope.get("total_cost_usd")
+    if isinstance(cost, (int, float)):
+        into["cost_usd"] = cost
+    duration_ms = envelope.get("duration_ms")
+    if isinstance(duration_ms, (int, float)):
+        into["duration_seconds"] = round(duration_ms / 1000, 1)
     model_usage = envelope.get("modelUsage", {})
     into["analysed_by"] = next(iter(model_usage)) if model_usage else "claude-code"
     usage = envelope.get("usage", {})
-    tokens = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-    if tokens:
-        into["_tokens"] = tokens
+    in_tokens = usage.get("input_tokens", 0) or 0
+    out_tokens = usage.get("output_tokens", 0) or 0
+    if "input_tokens" in usage or "output_tokens" in usage:
+        into["_tokens"] = in_tokens + out_tokens
 
 
 def parse_cc_structured(
