@@ -19,6 +19,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.git import get_safe_git_env
+
 from cve_diff.core.exceptions import IdenticalCommitsError
 from cve_diff.core.models import CommitSha
 
@@ -64,6 +66,7 @@ class CommitResolver:
                 text=True,
                 check=False,
                 timeout=30,
+                env=get_safe_git_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError(f"git rev-parse {clean!r} timed out") from exc
@@ -89,6 +92,7 @@ class CommitResolver:
                 text=True,
                 check=False,
                 timeout=30,
+                env=get_safe_git_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError(
@@ -111,6 +115,7 @@ class CommitResolver:
                 text=True,
                 check=False,
                 timeout=30,
+                env=get_safe_git_env(),
             )
         except subprocess.TimeoutExpired:
             return False

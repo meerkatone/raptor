@@ -37,7 +37,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.git import clone_repository, fetch_commit
+from core.git import clone_repository, fetch_commit, get_safe_git_env
 
 from cve_diff.core.exceptions import AcquisitionError
 from cve_diff.core.models import RepoRef
@@ -63,6 +63,7 @@ def _commit_exists(repo_path: Path, sha: str) -> bool:
             capture_output=True,
             check=False,
             timeout=30,
+            env=get_safe_git_env(),
         )
     except subprocess.TimeoutExpired:
         return False
