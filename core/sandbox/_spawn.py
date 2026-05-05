@@ -340,6 +340,11 @@ def run_sandboxed(
     _audit_config_path: Optional[str] = None
     if audit_mode:
         if audit_run_dir is None:
+            # Clean up the just-created mkdtemp stub before raising.
+            # Pre-fix this raise leaked a `.raptor-sbx-*` directory on
+            # every misuse of the API. The fork try/except below only
+            # covers cleanup AFTER the audit-mode setup completes.
+            _cleanup_stub(_root_dir)
             raise ValueError(
                 "audit_mode=True requires audit_run_dir="
             )
@@ -484,9 +489,12 @@ def run_sandboxed(
                     _written += n
             except BaseException:
                 # Partial / failed write — unlink the empty/partial
-                # file and propagate so the operator sees the error
-                # immediately rather than an ambiguous tracer
-                # timeout later.
+                # file AND the mkdtemp stub created above, then
+                # propagate so the operator sees the error immediately
+                # rather than an ambiguous tracer timeout later. The
+                # fork try/except below would re-cleanup if reached,
+                # but it isn't reached when we raise here, so do both
+                # cleanups inline.
                 try:
                     os.close(_cfd)
                 except OSError:
@@ -495,6 +503,7 @@ def run_sandboxed(
                     os.unlink(_audit_config_path)
                 except OSError:
                     pass
+                _cleanup_stub(_root_dir)
                 _audit_config_path = None
                 _audit_engaged = False
                 raise
@@ -590,11 +599,17 @@ def run_sandboxed(
             )
             child_pid = os.fork()
     except BaseException:
-        # Any failure before fork returns: close opened pipes AND the
+        # Any failure before fork returns: close opened pipes, unlink
+        # the audit-config tempfile if it was created, and remove the
         # mkdtemp stub. Without this, a pipe-exhaustion OSError or
-        # import-time failure in preexec construction would leak FDs
-        # and leave a .raptor-sbx-* dir behind on every call.
+        # import-time failure in preexec construction would leak FDs,
+        # the audit-config file, and a .raptor-sbx-* dir on every call.
         _close_leftover()
+        if _audit_config_path is not None:
+            try:
+                os.unlink(_audit_config_path)
+            except OSError:
+                pass
         _cleanup_stub(_root_dir)
         raise
     if child_pid == 0:
