@@ -108,12 +108,22 @@ def _check_litellm_installed() -> bool:
 
             # litellm is installed — PyYAML is guaranteed (transitive dep).
             # Pre-emptively migrate config before any other checks.
+            #
+            # Catch the specific failure modes rather than bare
+            # `except Exception`:
+            #   * RuntimeError — Path.home() raises this when no HOME
+            #     is set (some daemon/systemd-unit environments).
+            #   * OSError — exists() / migration file ops.
+            #   * yaml.YAMLError — malformed source config from migrate.
+            # Bare `except Exception` would also swallow programming
+            # bugs (AttributeError, NameError) introduced by future
+            # edits — losing valuable signal during development.
             try:
                 old_config = Path.home() / ".config/litellm/config.yaml"
                 new_config = Path.home() / ".config/raptor/models.json"
                 if old_config.exists() and not new_config.exists():
                     _try_auto_migrate(old_config, new_config)
-            except Exception:
+            except (RuntimeError, OSError):
                 pass  # Migration is best-effort
 
             if installed in ("1.82.7", "1.82.8"):
