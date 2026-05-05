@@ -1027,12 +1027,14 @@ class OpenAICompatibleProvider(LLMProvider):
                     f"{attempt + 1}, retrying in {delay:.1f}s: {exc}"
                 )
                 time.sleep(delay)
-        else:
-            return TurnResponse(
-                content=[], stop_reason=StopReason.ERROR,
-                input_tokens=0, output_tokens=0,
-                error_message="exhausted retries",
-            )
+        # No `else:` branch — the for/else here was dead. Every
+        # exception path either returns early (permanent error,
+        # tool-use unsupported, retries exhausted) or continues to
+        # retry. Success path breaks. The for/else body would only
+        # fire if the loop exhausted naturally without break, which
+        # is unreachable: `attempt >= max_retries` in the except
+        # triggers the early return before the loop would naturally
+        # terminate.
         duration = time.monotonic() - t_start
 
         # ---- normalise response --------------------------------------
@@ -1586,12 +1588,14 @@ class AnthropicProvider(LLMProvider):
                     f"{attempt + 1}, retrying in {delay:.1f}s: {exc}"
                 )
                 time.sleep(delay)
-        else:
-            return TurnResponse(
-                content=[], stop_reason=StopReason.ERROR,
-                input_tokens=0, output_tokens=0,
-                error_message="exhausted retries",
-            )
+        # No `else:` branch — the for/else here was dead. Every
+        # exception path either returns early (permanent error,
+        # tool-use unsupported, retries exhausted) or continues to
+        # retry. Success path breaks. The for/else body would only
+        # fire if the loop exhausted naturally without break, which
+        # is unreachable: `attempt >= max_retries` in the except
+        # triggers the early return before the loop would naturally
+        # terminate.
         duration = time.monotonic() - t_start
 
         # ---- normalise response --------------------------------------
