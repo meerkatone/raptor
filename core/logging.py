@@ -90,8 +90,25 @@ class RaptorLogger:
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
 
-        # File handler with JSON formatting for audit trail
-        log_file = RaptorConfig.LOG_DIR / f"raptor_{int(time.time())}.jsonl"
+        # File handler with JSON formatting for audit trail.
+        #
+        # Filename includes PID and a 4-digit monotonic-ns tail
+        # alongside the wall-clock second. Pre-fix the name was just
+        # `raptor_<unix_seconds>.jsonl` — two RAPTOR processes
+        # starting in the same wall-clock second computed identical
+        # filenames. `logging.FileHandler` opens with mode "a"
+        # (append), so the two processes' logs interleaved into one
+        # file with no PID separator — operators couldn't reconstruct
+        # which line came from which run.
+        #
+        # Same shape as `core/run/output.unique_run_suffix` (batch
+        # 143): wall-clock second + pid + 4-digit monotonic-ns tail.
+        import os as _os
+        ns_tail = time.monotonic_ns() % 10_000
+        log_file = (
+            RaptorConfig.LOG_DIR
+            / f"raptor_{int(time.time())}_pid{_os.getpid()}_{ns_tail:04d}.jsonl"
+        )
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)
         json_formatter = JSONFormatter()
