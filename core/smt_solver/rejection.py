@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Union
 
+from .availability import z3
 from .config import BVProfile
 
 
@@ -187,9 +188,22 @@ def classify_solver_unknown(solver: Any) -> RejectionKind:
     :data:`RejectionKind.SOLVER_UNKNOWN` (incomplete tactic, undecidable
     fragment, ...).
     """
+    # Catch the specific failure modes Z3 may exhibit — bare
+    # `except Exception` swallowed programming bugs introduced by
+    # future maintainers (AttributeError if `solver` is the wrong
+    # type, NameError, etc.) and silently mis-classified them as
+    # SOLVER_UNKNOWN. Z3's `reason_unknown` may legitimately raise
+    # `z3.Z3Exception` (no model available — solver hasn't been
+    # called yet; called after add() during reset; etc.) or
+    # `RuntimeError` from the wrapping in some Z3 builds. Also
+    # tolerate AttributeError specifically — caller passing None or
+    # a stub object is explicit-enough that we shouldn't crash, but
+    # narrower TypeError-level mismatches should propagate.
     try:
         reason = (solver.reason_unknown() or "").lower()
-    except Exception:
+    except (AttributeError,) + (
+        (z3.Z3Exception,) if hasattr(z3, "Z3Exception") else ()
+    ) + (RuntimeError,):
         return RejectionKind.SOLVER_UNKNOWN
     if "timeout" in reason or "canceled" in reason or "cancelled" in reason:
         return RejectionKind.SOLVER_TIMEOUT
