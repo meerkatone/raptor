@@ -441,9 +441,24 @@ def check_active_project() -> str | None:
         if not data:
             return None
         proj_target = data.get("target", "")
+        # Bounded read of the .auto marker. Pre-fix `read_text()`
+        # loaded the WHOLE file into memory before the strip+compare.
+        # The marker SHOULD only ever contain a project name (a few
+        # bytes) but if the file was malformed (a hostile sample, a
+        # corrupted sparse file, a symlink-to-/dev/zero) the unbounded
+        # read OOM-killed the entire startup banner. Read just enough
+        # bytes to compare against `name + 1` so any oversize file
+        # rejects via the comparison.
         auto_marker = PROJECTS_DIR / ".auto"
-        if auto_marker.exists() and auto_marker.read_text().strip() == name:
-            return f"Auto-activated project: {name} ({proj_target}) — `/project none` to clear"
+        if auto_marker.exists():
+            try:
+                cap = max(len(name) + 64, 256)
+                with auto_marker.open("rb") as fh:
+                    head = fh.read(cap)
+                if head.decode("utf-8", errors="replace").strip() == name:
+                    return f"Auto-activated project: {name} ({proj_target}) — `/project none` to clear"
+            except OSError:
+                pass
         return f"Project: {name} ({proj_target}) — `/project none` to clear"
     except Exception:
         return None
