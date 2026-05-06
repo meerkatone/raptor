@@ -776,9 +776,24 @@ class RetryTask(AnalysisTask):
                         elif k.startswith("_"):
                             merged[k] = v  # pipeline state — prior wins.
                 prior_results[fid] = merged
-            prior_results[fid]["retried"] = True
+            # setdefault before sub-key mutation. Pre-fix
+            # `prior_results[fid]["retried"] = True` raised
+            # KeyError when the retry-result fid wasn't already
+            # in prior_results — a documented invariant of
+            # select_items but not enforced anywhere. Two real
+            # ways this gets violated:
+            #   (1) Caller filters prior_results between
+            #       select_items() and finalize() (e.g. drops
+            #       findings that exhausted budget mid-stage).
+            #   (2) Tests construct results lists directly
+            #       without populating prior_results, exposing
+            #       the mutation as a silent test failure.
+            # `setdefault({})` makes the mutation safe in either
+            # case — no behaviour change for the common path.
+            entry = prior_results.setdefault(fid, {})
+            entry["retried"] = True
             if not was_contradictory and not decisive:
-                prior_results[fid]["low_confidence"] = True
+                entry["low_confidence"] = True
         return results
 
 
