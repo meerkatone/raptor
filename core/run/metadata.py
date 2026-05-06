@@ -448,15 +448,23 @@ def cancel_run(output_dir: Path, extra: Dict[str, Any] = None) -> None:
 
 
 @contextlib.contextmanager
-def tracked_run(output_dir: Path, command: str, extra: Dict[str, Any] = None):
+def tracked_run(output_dir: Path, command: str, extra: Dict[str, Any] = None,
+                target: str = None):
     """Context manager for run lifecycle. Writes metadata automatically.
 
     Usage:
-        with tracked_run(out_dir, "agentic") as run_dir:
+        with tracked_run(out_dir, "agentic", target="/repo") as run_dir:
             # do work...
         # .raptor-run.json: completed on success, failed on exception, cancelled on Ctrl-C
+
+    `target` is forwarded to `start_run`. Pre-fix `tracked_run`
+    didn't accept it — callers using the context-manager style
+    couldn't record the scan target into the metadata file (the
+    `target_path` field that downstream consumers — project-listing,
+    coverage rollups, multi-target dedup — read from
+    `.raptor-run.json`). Now mirrored from start_run's signature.
     """
-    run_dir = start_run(output_dir, command, extra)
+    run_dir = start_run(output_dir, command, extra, target=target)
     try:
         yield run_dir
         complete_run(run_dir)
