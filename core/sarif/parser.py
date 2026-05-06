@@ -467,6 +467,47 @@ def parse_sarif_findings(sarif_path: Path) -> List[Dict[str, Any]]:
             if rid:
                 rules_by_id[rid] = {"cwe_id": cwe_id}
 
+        # Per-run originalUriBaseIds for relative-URI resolution.
+        # SARIF emitters commonly emit `result.locations[*].artifactLocation
+        # = {"uri": "src/foo.c", "uriBaseId": "%SRCROOT%"}` rather than
+        # an absolute URI. Pre-fix the parser took `artifact.get("uri")`
+        # verbatim — `findings[i].file` came out as `"src/foo.c"`,
+        # which subsequent consumers (vulnerability-rendering,
+        # editor-jump links, dedup keyed on file path) treated as a
+        # path relative to wherever they happened to be running.
+        # Resolve via the run's `originalUriBaseIds` table.
+        uri_bases = run.get("originalUriBaseIds") or {}
+
+        def _resolve_uri(art: Dict[str, Any]) -> Optional[str]:
+            """Resolve `art.uri` against the run's `originalUriBaseIds`,
+            following nested `uriBaseId` references up to a small depth
+            cap. Returns the final URI string, or None if the input
+            has no `uri`."""
+            uri = art.get("uri")
+            if uri is None:
+                return None
+            base_id = art.get("uriBaseId")
+            seen: Set[str] = set()
+            depth = 0
+            while base_id and base_id not in seen and depth < 16:
+                seen.add(base_id)
+                depth += 1
+                base = uri_bases.get(base_id)
+                if not isinstance(base, dict):
+                    break
+                base_uri = base.get("uri")
+                if not isinstance(base_uri, str):
+                    break
+                # SARIF spec: base URIs end in '/'. Tolerate missing
+                # separator without doubling.
+                if not base_uri.endswith("/"):
+                    base_uri = base_uri + "/"
+                # Don't double-slash if the inner URI happens to be
+                # absolute on its own.
+                uri = base_uri + uri.lstrip("/")
+                base_id = base.get("uriBaseId")
+            return uri
+
         for result in results:
             # finding_id resolution:
             #   1. SARIF tool-supplied fingerprint (best — survives
@@ -516,7 +557,7 @@ def parse_sarif_findings(sarif_path: Path) -> List[Dict[str, Any]]:
                     "finding_id": finding_id,
                     "rule_id": rule_id,
                     "message": result.get("message", {}).get("text"),
-                    "file": artifact.get("uri"),
+                    "file": _resolve_uri(artifact),
                     "startLine": region.get("startLine"),
                     "endLine": region.get("endLine"),
                     "snippet": snippet,
