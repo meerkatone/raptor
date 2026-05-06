@@ -104,16 +104,49 @@ def _get_session_pid() -> Optional[int]:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Check if a process is alive. Returns False for invalid PIDs."""
+    """Check if a process is alive AND looks like the original.
+
+    Returns False for invalid PIDs.
+
+    PID-reuse hazard: a session_pid recorded yesterday (Claude Code
+    session A, PID 12345). Session A exits; the kernel reuses PID
+    12345 for an unrelated process (a cron job, an editor, any
+    long-lived daemon). Plain `os.kill(pid, 0)` returns True for the
+    wrong process. `_cleanup_abandoned` then treats the long-dead
+    Claude Code session as still alive and skips legitimate cleanup
+    of its abandoned runs.
+
+    Cross-check with `/proc/<pid>/comm` on Linux: if the running
+    process at that PID isn't named `claude` (or a `claude*` variant
+    — `claude-code`, `claude.sh` wrapper, etc.), it's not the
+    session that recorded the run. Treat as dead so cleanup can
+    proceed.
+
+    Falls back to plain `os.kill(pid, 0)` on non-Linux (no /proc) —
+    accepts the residual PID-reuse risk on macOS/BSD where the
+    canonical /proc isn't available.
+    """
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True  # alive but owned by another user
+
+    # Process exists at that PID. On Linux, verify it's still a
+    # claude-shaped process — `comm` is the binary basename truncated
+    # to 16 chars (TASK_COMM_LEN), so we substring-match `claude`.
+    proc_comm = Path(f"/proc/{pid}/comm")
+    if not proc_comm.exists():
+        # Non-Linux or `/proc` not mounted — best-effort accept.
+        return True
+    try:
+        comm = proc_comm.read_text(errors="replace").strip().lower()
+    except OSError:
+        return True
+    return "claude" in comm
 
 
 def start_run(output_dir: Path, command: str, extra: Dict[str, Any] = None,
