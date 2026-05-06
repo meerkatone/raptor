@@ -503,8 +503,13 @@ def _match_to_inventory(path: str, inventory_paths: set) -> Optional[str]:
     if path in inventory_paths:
         return path
 
-    # Strip leading ./
-    stripped = path.lstrip("./")
+    # Strip leading ./ — `lstrip("./")` would strip ANY leading
+    # `.` or `/` character (set semantics, not prefix), so:
+    #   * `.foo.py` (hidden file) → `foo.py` (wrong inventory key)
+    #   * `//abs/path` (double slash from a careless join) → `abs/path`
+    #   * `...etc` → `etc`
+    # `removeprefix` only strips the literal prefix once.
+    stripped = path.removeprefix("./")
     if stripped in inventory_paths:
         return stripped
 
