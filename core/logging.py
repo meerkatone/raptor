@@ -43,8 +43,18 @@ class JSONFormatter(logging.Formatter):
         Returns:
             JSON string representation of log record
         """
+        # ISO 8601 with timezone offset rather than the legacy
+        # `%Y-%m-%d %H:%M:%S,xxx` format from `formatTime`. ISO is
+        # the canonical form across the codebase (matches every
+        # other tz-aware timestamp emitted by run/metadata,
+        # sandbox/audit, telemetry — see batches 154, 173). Mixed
+        # formats in the JSONL audit trail force consumers to
+        # parse two date shapes.
+        from datetime import datetime, timezone
         log_obj: Dict[str, Any] = {
-            "timestamp": self.formatTime(record, self.datefmt),
+            "timestamp": datetime.fromtimestamp(
+                record.created, tz=timezone.utc,
+            ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "module": record.module,
@@ -65,7 +75,15 @@ class JSONFormatter(logging.Formatter):
         if hasattr(record, "duration"):
             log_obj["duration"] = record.duration
 
-        return json.dumps(log_obj)
+        # `default=str` so non-JSON-native types in `extra` (Path,
+        # datetime, UUID, custom dataclass repr) serialise as their
+        # string form instead of crashing the format() call with
+        # `TypeError: Object of type X is not JSON serializable`.
+        # Pre-fix a single such kwarg from any caller anywhere
+        # killed the audit-trail write for that record AND every
+        # subsequent record in the same handler buffer (logging's
+        # default error handler doesn't recover the formatter).
+        return json.dumps(log_obj, default=str)
 
 
 class RaptorLogger:
