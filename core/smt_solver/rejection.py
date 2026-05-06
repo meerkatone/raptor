@@ -159,10 +159,22 @@ def parse_literal_value(tok: str, profile: BVProfile) -> Union[int, Rejection]:
             tok, RejectionKind.UNRECOGNIZED_OPERAND,
             f"token {tok!r} is not a hex or decimal literal",
         )
-    if v >= (1 << profile.width):
+    # Range check honours signedness. For an unsigned profile the
+    # representable range is [0, 2^width - 1]; for a signed profile
+    # (positive literals only — the regex rejects leading '-') the
+    # representable positive range is [0, 2^(width-1) - 1].
+    #
+    # Pre-fix the check used `v >= (1 << profile.width)` for both,
+    # so the literal `200` at int8 profile (signed, range -128..127)
+    # was accepted — it's < 256, but doesn't fit in a signed int8.
+    # Z3 then silently re-interpreted the bit pattern as -56,
+    # producing a verdict that didn't match the source intent.
+    upper_exclusive = (1 << (profile.width - 1)) if profile.signed else (1 << profile.width)
+    if v >= upper_exclusive:
         return Rejection(
             tok, RejectionKind.LITERAL_OUT_OF_RANGE,
-            f"value {v:#x} exceeds {profile.width}-bit profile range",
+            f"value {v:#x} exceeds {profile.describe()} positive range "
+            f"(max {upper_exclusive - 1:#x})",
         )
     return v
 
