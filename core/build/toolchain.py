@@ -229,16 +229,38 @@ def apply_toolchain_env(env: Dict[str, str],
                 f"entry {name!r}. Add a detect_{name}() helper or "
                 f"remove the name from BUILD_SYSTEMS.env_detect."
             )
-        # Treat any detector exception as "not found" rather than
+        # Treat detector failures as "not found" rather than
         # propagating — a detector crash on an exotic distro (odd
-        # filesystem, broken shutil.which) should NOT take out the
-        # whole build. The warning below tells operators what happened.
+        # filesystem, broken shutil.which, subprocess timeout)
+        # should NOT take out the whole build.
+        #
+        # Two-tier logging:
+        #   * Expected failure classes (OSError, subprocess.*,
+        #     TimeoutError) log at WARNING — these happen in the
+        #     wild on legitimate broken hosts and aren't actionable.
+        #   * Anything else (AttributeError from a typo, NameError
+        #     from a refactor, TypeError from wrong return shape) is
+        #     almost certainly a programming bug — log at ERROR with
+        #     exc_info so the traceback surfaces in CI / dev. Pre-fix
+        #     ALL exception types logged at WARNING with no
+        #     traceback, silently masking real bugs introduced by
+        #     detector edits.
+        import subprocess
+        expected_failures = (OSError, subprocess.SubprocessError, TimeoutError)
         try:
             value = DETECTORS[name]()
-        except Exception as e:
+        except expected_failures as e:
             logger.warning(
                 f"build toolchain: detector for {name} raised "
                 f"{type(e).__name__}: {e} — treating as not found."
+            )
+            value = None
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "build toolchain: detector for %s raised "
+                "unexpected %s: %s — treating as not found "
+                "(this is likely a programming bug, see traceback)",
+                name, type(e).__name__, e, exc_info=True,
             )
             value = None
         if value is None:
