@@ -1304,15 +1304,39 @@ def _structural_grouping(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for rule, fids in by_rule.items():
         _add_group("rule_id", rule, fids)
 
+    def _loc_key(d: Dict[str, Any]) -> Optional[str]:
+        """Build a `file:line` key from a dataflow node dict, or
+        return None if both fields are missing.
+
+        Pre-fix every site used `f"{d.get('file','?')}:{d.get('line','?')}"`
+        which produced the literal key `"?:?"` when both fields
+        were absent. ALL findings missing dataflow data then
+        clustered together under criterion_value=`?:?` — a
+        noise group with no analytical value, frequently the
+        biggest "structural" cluster in a scan because every
+        finding lacking dataflow extraction (most non-codeql
+        findings) landed there. Return None and let callers
+        skip the entry.
+        """
+        fp = d.get("file")
+        ln = d.get("line")
+        if not fp and ln in (None, ""):
+            return None
+        return f"{fp or '?'}:{ln if ln not in (None, '') else '?'}"
+
     # Group by shared sanitiser location
     by_sanitiser: Dict[str, List[str]] = {}
     for fid, r in findings_by_id.items():
         dataflow = r.get("dataflow") or {}
         for san in dataflow.get("sanitizers_found", []):
             if isinstance(san, dict):
-                loc = f"{san.get('file', '?')}:{san.get('line', '?')}"
+                loc = _loc_key(san)
+                if loc is None:
+                    continue
             else:
                 loc = str(san)
+                if not loc.strip():
+                    continue
             by_sanitiser.setdefault(loc, []).append(fid)
     for loc, fids in by_sanitiser.items():
         _add_group("sanitiser", loc, fids)
@@ -1323,7 +1347,9 @@ def _structural_grouping(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         dataflow = r.get("dataflow") or {}
         source = dataflow.get("source", {})
         if source:
-            loc = f"{source.get('file', '?')}:{source.get('line', '?')}"
+            loc = _loc_key(source)
+            if loc is None:
+                continue
             by_source.setdefault(loc, []).append(fid)
     for loc, fids in by_source.items():
         _add_group("dataflow_source", loc, fids)
@@ -1335,15 +1361,18 @@ def _structural_grouping(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         dataflow = r.get("dataflow") or {}
         source = dataflow.get("source", {})
         if source:
-            ref = f"{source.get('file', '?')}:{source.get('line', '?')}"
-            ref_to_fids.setdefault(ref, set()).add(fid)
+            ref = _loc_key(source)
+            if ref is not None:
+                ref_to_fids.setdefault(ref, set()).add(fid)
         for step in dataflow.get("steps", []):
-            ref = f"{step.get('file', '?')}:{step.get('line', '?')}"
-            ref_to_fids.setdefault(ref, set()).add(fid)
+            ref = _loc_key(step)
+            if ref is not None:
+                ref_to_fids.setdefault(ref, set()).add(fid)
         sink = dataflow.get("sink", {})
         if sink:
-            ref = f"{sink.get('file', '?')}:{sink.get('line', '?')}"
-            ref_to_fids.setdefault(ref, set()).add(fid)
+            ref = _loc_key(sink)
+            if ref is not None:
+                ref_to_fids.setdefault(ref, set()).add(fid)
 
     for ref, fids_set in ref_to_fids.items():
         _add_group("shared_dataflow_ref", ref, list(fids_set))
