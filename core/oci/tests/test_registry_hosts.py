@@ -21,9 +21,11 @@ from core.oci.registry_hosts import registry_hosts_for
 def test_docker_hub_returns_two_hosts():
     """Docker Hub splits manifests + auth across two hosts. Both
     must be on the allowlist or the bearer-token dance fails."""
+    # Set-equality (rather than ``"x" in hosts``) because the
+    # latter pattern trips CodeQL's incomplete-URL-substring
+    # heuristic on string-shaped hostnames.
     hosts = registry_hosts_for("python:3.11")
-    assert "registry-1.docker.io" in hosts
-    assert "auth.docker.io" in hosts
+    assert set(hosts) == {"registry-1.docker.io", "auth.docker.io"}
 
 
 def test_docker_hub_works_with_explicit_registry_prefix():
@@ -55,20 +57,28 @@ def test_ecr_private_adds_regional_sts_and_ecr_api():
     short-lived token via the AWS SDK against those endpoints.
     Without them on the allowlist, anonymous pulls fail and
     authenticated pulls fail with cryptic 'connection refused'."""
+    # Set-equality form sidesteps CodeQL's incomplete-URL-substring
+    # heuristic on the ``"x" in hosts`` pattern with hostname-shaped
+    # strings.
     hosts = registry_hosts_for(
         "1234.dkr.ecr.us-east-1.amazonaws.com/myapp:v2",
     )
-    assert "1234.dkr.ecr.us-east-1.amazonaws.com" in hosts
-    assert "ecr.us-east-1.amazonaws.com" in hosts
-    assert "sts.us-east-1.amazonaws.com" in hosts
+    assert set(hosts) == {
+        "1234.dkr.ecr.us-east-1.amazonaws.com",
+        "ecr.us-east-1.amazonaws.com",
+        "sts.us-east-1.amazonaws.com",
+    }
 
 
 def test_ecr_other_region():
     hosts = registry_hosts_for(
         "555.dkr.ecr.eu-west-2.amazonaws.com/img:1",
     )
-    assert "ecr.eu-west-2.amazonaws.com" in hosts
-    assert "sts.eu-west-2.amazonaws.com" in hosts
+    assert set(hosts) == {
+        "555.dkr.ecr.eu-west-2.amazonaws.com",
+        "ecr.eu-west-2.amazonaws.com",
+        "sts.eu-west-2.amazonaws.com",
+    }
 
 
 def test_ecr_public_single_host():
