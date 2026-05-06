@@ -235,7 +235,19 @@ def load_tuning(path: Optional[Path] = None) -> Tuning:
 
 
 def _create_default_file(path: Path) -> None:
-    """Write the shipped-default tuning.json for discoverability."""
+    """Write the shipped-default tuning.json for discoverability.
+
+    Uses an atomic write (write to `.tmp.<pid>` sibling, then
+    rename) so that:
+      * A concurrent reader (libexec/raptor-tune, get_tuning's
+        re-load) can never observe a half-written file.
+      * Crash mid-write doesn't leave a corrupt tuning.json that
+        every subsequent get_tuning() trip-falls over.
+      * Two concurrent writers (this function + raptor-tune CLI
+        racing) don't share a tempfile path — pid suffix
+        disambiguates so each writer's tmp survives until its own
+        rename, and the final rename is last-writer-wins.
+    """
     try:
         # Import here to avoid circular dep with libexec/raptor-tune
         # which also writes this file. Use the same format.
@@ -259,7 +271,21 @@ def _create_default_file(path: Path) -> None:
         for entry, comment in entries:
             lines.append(f"{entry:<{col}}// {comment}")
         lines.append("}")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        content = "\n".join(lines) + "\n"
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
+        except BaseException:
+            # Clean up partial tmp on any failure (including
+            # KeyboardInterrupt mid-write) so the next call doesn't
+            # find an orphan and racers don't see stale tmp files
+            # piling up.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass
 
