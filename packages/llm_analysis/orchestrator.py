@@ -914,8 +914,21 @@ def _resolve_cross_family_checker(
     primary_name = analysis_model.model_name
     primary_family = family_of(primary_name)
 
+    # Include `analysis_models[1:]` so the SECONDARY analysis
+    # models from a multi-model run are eligible as cross-family
+    # checkers. Pre-fix only consensus_models + fallback_models
+    # were considered; an operator running
+    # `--analysis-models claude-opus,gpt-4` (one each, no
+    # consensus/fallback configured) got NO cross-family checker
+    # candidates from resolved roles, falling through to env
+    # auto-detect — which then required a SEPARATE provider env
+    # var (PROVIDER_ENV_KEYS) and silently returned None when
+    # only the two analysis-model keys were set. The user's
+    # explicit second model was sitting right there in
+    # role_resolution and would have been the obvious choice.
     candidates = (
-        role_resolution.get("consensus_models", [])
+        role_resolution.get("analysis_models", [])[1:]
+        + role_resolution.get("consensus_models", [])
         + role_resolution.get("fallback_models", [])
     )
     for m in candidates:
