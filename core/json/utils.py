@@ -6,11 +6,14 @@ serialization of Path/datetime objects.
 """
 
 import json
+import logging
 import os
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 
 def load_json(path: Union[str, Path], strict: bool = False) -> Optional[Any]:
@@ -38,7 +41,16 @@ def load_json(path: Union[str, Path], strict: bool = False) -> Optional[Any]:
         return json.loads(p.read_text(encoding="utf-8-sig"))
     try:
         return json.loads(p.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        # Pre-fix this returned None silently. Operators investigating
+        # "why is my config not loading" had no signal — the file
+        # existed, the function returned None, downstream code
+        # crashed on missing data without any breadcrumb pointing
+        # at the parse failure. Log at warning so a developer
+        # debugging "missing data" sees the JSON error and the file
+        # path; not error so legitimate optional/best-effort callers
+        # don't trigger alarm.
+        logger.warning("load_json: failed to parse %s: %s", p, e)
         return None
 
 
@@ -93,7 +105,8 @@ def load_json_with_comments(path: Union[str, Path]) -> Optional[Any]:
         if not stripped.strip():
             return None
         return json.loads(stripped)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("load_json_with_comments: failed to parse %s: %s", p, e)
         return None
 
 
