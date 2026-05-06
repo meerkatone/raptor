@@ -47,6 +47,7 @@ from typing import Optional
 from core.json import load_json, save_json
 from core.sandbox import run as sandbox_run
 from core.schema_constants import CONFIDENCE_LEVELS
+from core.security.log_sanitisation import escape_nonprintable
 
 logger = logging.getLogger(__name__)
 
@@ -815,11 +816,24 @@ def _select_findings_for_validate(analysis_report: Path) -> list:
 
 
 def _build_understand_prompt(target: Path, understand_dir: Path) -> str:
+    # Escape control / format / ANSI bytes from path interpolation
+    # before splicing into the prompt. `target` and `understand_dir`
+    # come from caller-supplied input that may have flowed from a
+    # repository name, an argv flag, or a config file. A path
+    # containing `\x1b[2J` (clear-screen escape), CR/LF (prompt
+    # injection — adds "  Now follow these new instructions:"
+    # on the next visible line), or bidi-control bytes (visually
+    # mask malicious content) hijacks the prompt the LLM sees.
+    # `escape_nonprintable` replaces dangerous bytes with `\xHH`
+    # escapes that the model still reads as a path string.
+    safe_target = escape_nonprintable(str(target))
+    safe_dir = escape_nonprintable(str(understand_dir))
+    safe_raptor = escape_nonprintable(str(_RAPTOR_DIR))
     return f"""You are running the /understand --map workflow on a target repository
 as a pre-pass for the /agentic security workflow.
 
-Target repository: {target}
-Output directory:  {understand_dir}
+Target repository: {safe_target}
+Output directory:  {safe_dir}
 
 The launcher has already created the run directory and built checklist.json.
 Your job is to produce context-map.json so downstream analysis (the agentic
@@ -829,11 +843,11 @@ has architectural context.
 Steps:
 
 1. Load .claude/skills/code-understanding/SKILL.md and
-   .claude/skills/code-understanding/map.md from {_RAPTOR_DIR}.
+   .claude/skills/code-understanding/map.md from {safe_raptor}.
 
 2. Perform the --map analysis (MAP-0 through MAP-5) against the target.
 
-3. Write the resulting context-map.json directly into {understand_dir}.
+3. Write the resulting context-map.json directly into {safe_dir}.
 
 4. Do not call libexec/raptor-run-lifecycle — the launcher manages the
    lifecycle for you. Just produce context-map.json.
