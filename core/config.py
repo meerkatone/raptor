@@ -404,6 +404,20 @@ class RaptorConfig:
         "CURL_CA_BUNDLE",      # curl trust anchor override.
         "SSL_CERT_FILE",       # OpenSSL-based tools' trust anchor override.
         "SSL_CERT_DIR",        # OpenSSL-based tools' trust anchor dir.
+        # Allocator config — both glibc and jemalloc honour these env
+        # vars. They can enable allocator features (verbose stats,
+        # core dumps on detected corruption, profiling output paths)
+        # that an attacker can use to (a) leak memory contents into
+        # log files at predictable paths, (b) cause core dumps that
+        # may contain credentials, (c) redirect heap profile output
+        # to attacker-writable paths.
+        "MALLOC_CONF",         # jemalloc configuration string.
+        "JE_MALLOC_CONF",      # alternate jemalloc env var (some builds).
+        "MALLOC_CHECK_",       # glibc heap consistency check; high values
+                               # write to stderr → log injection.
+        "MALLOC_PERTURB_",     # glibc fill-pattern; not security-critical
+                               # alone but lets an attacker influence
+                               # uninitialised-memory disclosure ABI.
         # Note: TERM is NOT stripped — it's read as a string (terminfo lookup),
         # not shell-evaluated. Stripping it breaks colour output in git/grep/etc.
     ]
