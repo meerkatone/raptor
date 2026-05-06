@@ -310,15 +310,20 @@ def test_reset_all(seeded_scorecard):
 
 def test_libexec_shim_runs(tmp_path):
     """End-to-end: the shim is executable and dispatches to the CLI.
-    Empty scorecard → "(no scorecard data)" message."""
+    Empty scorecard → "(no scorecard data)" message.
+
+    Sets ``_RAPTOR_TRUSTED=1`` to bypass the inline trust-marker
+    check the shim shares with every libexec script — that gate is
+    designed to refuse bare-shell invocation but allow tests."""
     repo_root = Path(__file__).resolve().parents[4]
     shim = repo_root / "libexec" / "raptor-llm-scorecard"
     if not shim.exists():
         pytest.skip("shim not present (running outside the repo)")
     sc_path = tmp_path / "empty.json"
+    env = {**os.environ, "_RAPTOR_TRUSTED": "1"}
     out = subprocess.run(
         [str(shim), "--path", str(sc_path), "list"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, env=env,
     )
     assert out.returncode == 0, out.stderr
     assert "no scorecard data" in out.stdout

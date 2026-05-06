@@ -7,6 +7,15 @@
 
 set -e
 
+# ─── trust-marker check (do not source; inline by design) ───
+if [ -z "${CLAUDECODE:-}" ] && [ -z "${_RAPTOR_TRUSTED:-}" ]; then
+    echo "$0: internal dispatch script." >&2
+    echo "  Run via 'bin/raptor' instead." >&2
+    echo "  Tests / power users: set _RAPTOR_TRUSTED=1 to bypass." >&2
+    exit 2
+fi
+# ─── end trust-marker check ─────────────────────────────────
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
