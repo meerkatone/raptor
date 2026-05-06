@@ -639,6 +639,32 @@ def orchestrate(
     # ExploitTask/PatchTask → Generate code (only for final-verdict exploitable)
     # GroupAnalysisTask     → Cross-finding patterns
 
+    # Multi-model correlation (pure Python, no LLM) — precompute
+    # FIRST so downstream stages (cross-family check, retry,
+    # consensus, judge) can SEE the multi-model agreement signal
+    # when making their own decisions. Pre-fix correlation ran
+    # AFTER all those stages, meaning their inputs reflected only
+    # primary-model verdicts and they couldn't tell whether their
+    # incoming finding was a unanimous-positive (high confidence,
+    # less critique needed) vs disputed (high confidence, more
+    # scrutiny warranted). Correlation is also re-applied as
+    # confidence_signals onto results_by_id here so e.g.
+    # CrossFamilyCheckTask.select_items can prefer disputed
+    # findings when budgeting its picks.
+    #
+    # NOTE: correlation is recomputed at the end (line ~692) too,
+    # because consensus/retry update the per-model verdicts and
+    # the final report should reflect post-pipeline state. The
+    # PRECOMPUTE here is for input to downstream stages; the
+    # POST-COMPUTE is for output to operators.
+    early_correlation = None
+    if n_analysis_models > 1:
+        from packages.llm_analysis.correlation import correlate_results
+        early_correlation = correlate_results(results_by_id)
+        for fid, signal in early_correlation.get("confidence_signals", {}).items():
+            if fid in results_by_id:
+                results_by_id[fid]["multi_model_confidence"] = signal
+
     # Cross-family re-check: suspicious responses (low quality / nonce leaked)
     # re-dispatched through a model from a different training lineage.
     if dispatch_mode == "external_llm" and analysis_model:
