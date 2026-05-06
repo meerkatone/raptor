@@ -21,14 +21,23 @@ def load_json(path: Union[str, Path], strict: bool = False) -> Optional[Any]:
 
     - strict=False (default): return None (for optional/best-effort files)
     - strict=True: raise the underlying exception (for required files)
+
+    Reads with ``utf-8-sig`` to transparently handle UTF-8 BOM
+    (`\\ufeff` at the start of the file). Pre-fix utf-8 read passed
+    the BOM straight to the JSON parser which rejected it with
+    "Expecting value: line 1 column 1 (char 0)" — Windows-edited
+    config files, files round-tripped through some text editors,
+    and many JSON exports from Office tools all carry a BOM.
+    `utf-8-sig` is a strict superset of `utf-8`: identical for
+    BOM-less files, transparent for BOM-prefixed ones.
     """
     p = Path(path)
     if not p.exists():
         return None
     if strict:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -75,7 +84,11 @@ def load_json_with_comments(path: Union[str, Path]) -> Optional[Any]:
     if not p.exists():
         return None
     try:
-        text = p.read_text(encoding="utf-8")
+        # `utf-8-sig` for BOM tolerance — config files written /
+        # round-tripped through Windows editors commonly carry a
+        # leading `﻿` that vanilla utf-8 read passes through
+        # to the JSON parser as an unexpected character.
+        text = p.read_text(encoding="utf-8-sig")
         stripped = _strip_json_comments(text)
         if not stripped.strip():
             return None
