@@ -15,69 +15,83 @@ from core.config import RaptorConfig
 from core.json import load_json
 
 
+def _path_from_locations(
+    locations: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Build a {source, sink, steps, total_steps} dict from one
+    SARIF threadFlow's locations array. Returns None if there are
+    fewer than 2 locations (no source-to-sink path)."""
+    if len(locations) < 2:
+        return None
+    path: Dict[str, Any] = {
+        "source": None,
+        "sink": None,
+        "steps": [],
+        "total_steps": len(locations),
+    }
+    for idx, loc_wrapper in enumerate(locations):
+        location = loc_wrapper.get("location", {})
+        physical_loc = location.get("physicalLocation", {})
+        artifact = physical_loc.get("artifactLocation", {})
+        region = physical_loc.get("region", {})
+        message = location.get("message", {}).get("text", "")
+        step_info = {
+            "file": artifact.get("uri", ""),
+            "line": region.get("startLine", 0),
+            "column": region.get("startColumn", 0),
+            "label": message,
+            "snippet": region.get("snippet", {}).get("text", ""),
+        }
+        if idx == 0:
+            path["source"] = step_info
+        elif idx == len(locations) - 1:
+            path["sink"] = step_info
+        else:
+            path["steps"].append(step_info)
+    return path
+
+
 def extract_dataflow_path(code_flows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
     Extract dataflow path information from SARIF codeFlows.
 
-    Args:
-        code_flows: List of codeFlow objects from SARIF result
+    Pre-fix only `codeFlows[0].threadFlows[0]` was returned. SARIF
+    results commonly carry multiple code flows (one per source-to-sink
+    path the analyser identified) and multiple thread flows (one per
+    relevant thread). Picking only the first hid genuinely-different
+    paths from the operator — the second sink for the same source, the
+    second source feeding the same sink, etc.
 
     Returns:
-        Dictionary with source, sink, and intermediate steps, or None if no dataflow
+        Dict with `source`/`sink`/`steps`/`total_steps` for the first
+        usable path (back-compat for existing callers), plus an
+        `alternative_paths` list of the same dict-shape for every
+        OTHER (codeFlow, threadFlow) combination that produced a
+        valid 2+ location path. Empty list when the first is the
+        only path.
     """
     if not code_flows:
         return None
 
     try:
-        # Get the first code flow (typically the most relevant)
-        flow = code_flows[0]
         # `.get(k, default)` returns the value (None) when the key is
         # present-but-null. SARIF emitters legitimately produce
         # `"threadFlows": null` when no flow is available — guard with
-        # `or []` so the next [0] doesn't TypeError on None.
-        thread_flows = flow.get("threadFlows") or []
-        if not thread_flows:
+        # `or []` so iteration doesn't TypeError on None.
+        all_paths: List[Dict[str, Any]] = []
+        for flow in code_flows:
+            for tflow in (flow.get("threadFlows") or []):
+                locations = tflow.get("locations") or []
+                p = _path_from_locations(locations)
+                if p is not None:
+                    all_paths.append(p)
+
+        if not all_paths:
             return None
 
-        # Get all locations in the dataflow path
-        locations = thread_flows[0].get("locations") or []
-        if len(locations) < 2:  # Need at least source and sink
-            return None
-
-        dataflow_path = {
-            "source": None,
-            "sink": None,
-            "steps": [],
-            "total_steps": len(locations)
-        }
-
-        # Extract each location in the path
-        for idx, loc_wrapper in enumerate(locations):
-            location = loc_wrapper.get("location", {})
-            physical_loc = location.get("physicalLocation", {})
-            artifact = physical_loc.get("artifactLocation", {})
-            region = physical_loc.get("region", {})
-            message = location.get("message", {}).get("text", "")
-
-            step_info = {
-                "file": artifact.get("uri", ""),
-                "line": region.get("startLine", 0),
-                "column": region.get("startColumn", 0),
-                "label": message,
-                "snippet": region.get("snippet", {}).get("text", "")
-            }
-
-            # First location is the source
-            if idx == 0:
-                dataflow_path["source"] = step_info
-            # Last location is the sink
-            elif idx == len(locations) - 1:
-                dataflow_path["sink"] = step_info
-            # Everything else is an intermediate step
-            else:
-                dataflow_path["steps"].append(step_info)
-
-        return dataflow_path
+        primary = all_paths[0]
+        primary["alternative_paths"] = all_paths[1:]
+        return primary
 
     except Exception as e:
         print(f"[SARIF Parser] Warning: Failed to extract dataflow path: {e}")
