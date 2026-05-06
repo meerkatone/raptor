@@ -470,25 +470,41 @@ def load_run_metadata(run_dir: Path) -> Optional[Dict[str, Any]]:
     return load_json(run_dir / RUN_METADATA_FILE)
 
 
-def is_run_directory(path: Path) -> bool:
+def is_run_directory(path: Path, *, strict: bool = True) -> bool:
     """Check if a directory looks like a RAPTOR run output.
 
-    True if it has .raptor-run.json, or matches known naming patterns,
-    or contains typical output files.
+    Default (``strict=True``): requires the canonical
+    ``.raptor-run.json`` marker file. This is the only signal
+    `start_run` actually plants and that the rest of the lifecycle
+    relies on. Pre-fix the function ALSO accepted any directory whose
+    name matched a known command-prefix OR that contained a "typical
+    output file" (findings.json, checklist.json, ...) — the latter
+    in particular over-matched: a user dir of past validation
+    artifacts, a vendored sample, or a manually-copied subset all
+    looked like real runs to anything iterating on `is_run_directory`
+    (sweep / cleanup / project-listing logic).
+
+    ``strict=False``: legacy heuristic preserved for callers that
+    deliberately want the loose match (e.g., diagnostic tooling
+    inspecting pre-metadata historical runs from before
+    `.raptor-run.json` was a thing). Caller passes the flag
+    explicitly so the loose semantics are visible at the call site.
     """
     if not path.is_dir():
         return False
 
-    # Has metadata file
+    # Canonical marker — always sufficient.
     if (path / RUN_METADATA_FILE).exists():
         return True
 
-    # Matches known prefix patterns
+    if strict:
+        return False
+
+    # Lenient heuristics — opted into via strict=False.
     name = path.name
     if any(name.startswith(prefix) for prefix in _PREFIX_MAP):
         return True
 
-    # Contains typical output files
     typical_files = {"findings.json", "checklist.json", "scan_metrics.json",
                      "orchestrated_report.json", "validation-report.md"}
     if any((path / f).exists() for f in typical_files):

@@ -207,18 +207,26 @@ class TestIsRunDirectory(unittest.TestCase):
             start_run(out, "scan")
             self.assertTrue(is_run_directory(out))
 
-    def test_with_known_prefix(self):
+    def test_with_known_prefix_strict_rejects(self):
+        # Default strict mode: prefix alone is not enough — needs
+        # the canonical .raptor-run.json marker. Prevents over-match
+        # on user dirs that happen to start with `scan_`.
         with TemporaryDirectory() as d:
             out = Path(d) / "scan_vulns_20260406"
             out.mkdir()
-            self.assertTrue(is_run_directory(out))
+            self.assertFalse(is_run_directory(out))
+            self.assertTrue(is_run_directory(out, strict=False))
 
-    def test_with_typical_files(self):
+    def test_with_typical_files_strict_rejects(self):
+        # Default strict mode: stray findings.json in an unrelated
+        # dir doesn't make it a run dir. Lenient mode (the legacy
+        # heuristic, now opt-in) still accepts.
         with TemporaryDirectory() as d:
             out = Path(d) / "mystery_dir"
             out.mkdir()
             (out / "findings.json").write_text("{}")
-            self.assertTrue(is_run_directory(out))
+            self.assertFalse(is_run_directory(out))
+            self.assertTrue(is_run_directory(out, strict=False))
 
     def test_empty_dir(self):
         with TemporaryDirectory() as d:
