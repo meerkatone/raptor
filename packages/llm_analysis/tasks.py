@@ -240,8 +240,21 @@ class ConsensusTask(DispatchTask):
             r = prior_results.get(fid, {"error": True})
             if "error" in r:
                 continue
-            if not r.get("is_true_positive", True):
-                continue
+            # Pre-fix `if not r.get("is_true_positive", True):
+            # continue` skipped findings the primary had marked as
+            # false positive — consensus never voted on them. That
+            # made the consensus stage one-directional: it could
+            # catch primary's MISSED exploitable findings (TP-flag
+            # right, exploitability wrong) but couldn't catch
+            # primary's HALLUCINATED dismissals (TP-flag wrong —
+            # primary said "not a real bug" when it was). With the
+            # 1-vote conservative-max rule (batch 337), running
+            # consensus on FP cases is also free of risk: if both
+            # voters agree it's FP, nothing changes; if they
+            # disagree, conservative-max flips it to exploitable
+            # for operator review — same direction as the
+            # already-supported "primary said safe, consensus
+            # said exploitable" path.
             if r.get("cross_family_agreed"):
                 continue
             selected.append(f)
