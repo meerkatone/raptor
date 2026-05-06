@@ -11,6 +11,7 @@ Transport concerns (command building, envelope parsing) are delegated to
 import copy
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict
@@ -130,6 +131,48 @@ def invoke_cc_simple(prompt, schema, repo_path, claude_bin, out_dir,
                           duration=duration, quality=quality)
 
 
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
+_SAFE_ID_MAX = 80
+
+
+def _safe_id(finding_id: str) -> str:
+    """Sanitise a finding_id for filesystem use.
+
+    Pre-fix `Path(finding_id).name.replace("..", "_")` was the
+    only sanitisation. Three failure modes:
+
+    * NUL bytes: `Path("foo\\x00bar").name` returned the
+      original value on Linux, then `write_text` raised
+      ValueError mid-write.
+    * Long IDs: SARIF rule IDs can be 200+ chars (vendor-rule
+      pack URIs); concatenated into `cc_<id>.txt` they
+      exceeded ext4's 255-byte filename limit and
+      `mkdir`/`write_text` failed with ENAMETOOLONG.
+    * Path traversal via embedded slash: pre-fix the `.name`
+      attribute of `"sub/dir/leaf"` is `"leaf"` — losing the
+      sub/dir context but also opening the door to weird
+      Windows-path interactions if `finding_id` contained
+      backslashes (`Path("a\\\\b").name` is OS-dependent).
+
+    Whitelist `[A-Za-z0-9._-]` (sub everything else with `_`)
+    and cap at 80 chars (well under any FS limit, leaves room
+    for the `cc_` prefix and `.txt` suffix). Empty / whitespace
+    -> "unknown".
+    """
+    if not finding_id or not finding_id.strip():
+        return "unknown"
+    sanitised = _SAFE_ID_RE.sub("_", finding_id.strip())
+    # Defence-in-depth: collapse multiple consecutive `..` runs
+    # to one `_` so even after sanitisation no traversal token
+    # remains (whitelist already excludes `/` so this is mostly
+    # cosmetic, but keeps the filename predictable).
+    sanitised = sanitised.replace("..", "_")
+    if len(sanitised) > _SAFE_ID_MAX:
+        # Truncate from the right, keeping prefix for human readability.
+        sanitised = sanitised[:_SAFE_ID_MAX]
+    return sanitised or "unknown"
+
+
 def write_debug(
     out_dir: Path,
     finding_id: str,
@@ -141,7 +184,7 @@ def write_debug(
     try:
         debug_dir = out_dir / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
-        safe_id = Path(finding_id).name.replace("..", "_") if finding_id else "unknown"
+        safe_id = _safe_id(finding_id)
         debug_file = debug_dir / f"cc_{safe_id}.txt"
         debug_file.write_text(f"STDOUT:\n{stdout or '(empty)'}\n\nSTDERR:\n{stderr or '(empty)'}")
         result["cc_debug_file"] = f"debug/cc_{safe_id}.txt"
