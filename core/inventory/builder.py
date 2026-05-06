@@ -7,7 +7,7 @@ Used by both /validate (Stage 0) and /understand (MAP-0).
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -146,7 +146,7 @@ def build_inventory(
         limitations.append("SLOC counts used regex fallback (less accurate)")
 
     inventory = {
-        'generated_at': datetime.now().isoformat(),
+        'generated_at': datetime.now(timezone.utc).isoformat(),
         'target_path': str(target_path),
         'total_files': len(files_info),
         'total_items': total_items,
