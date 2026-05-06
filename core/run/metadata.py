@@ -140,14 +140,28 @@ def start_run(output_dir: Path, command: str, extra: Dict[str, Any] = None,
         metadata["tool_pid"] = os.getppid()
     if target:
         metadata["target_path"] = str(target)
-    # Mark this run as the active sandbox-summary recording target before
-    # any further setup work — guarantees that any sandbox calls made by
-    # _setup_checklist_symlink (or anything else added later between save_json
-    # and return) get recorded into this run's summary.
+    # Order: persist metadata FIRST, then mark as active.
+    #
+    # Pre-fix `set_active_run_dir(output_dir)` ran BEFORE `save_json`.
+    # If `save_json` crashed (disk full, EIO, permission flip), the
+    # "active run dir" pointer was already set to a directory with
+    # no metadata file. Subsequent sandbox-summary writes (and any
+    # other consumer that resolves "the active run") would target
+    # a directory the rest of the system can't recognise as a real
+    # run — `is_run_directory()` returns False, recovery / sweep
+    # logic doesn't see it.
+    #
+    # Persist first; mark active only on success. The original
+    # justification (sandbox calls inside `_setup_checklist_symlink`
+    # need the active dir set) still holds for those — they run
+    # AFTER the active-dir set, which now happens AFTER the
+    # metadata write, so the timing window for that case is
+    # unchanged.
+    #
     # Lazy import to avoid circular core.sandbox load on metadata import.
     from core.sandbox.summary import set_active_run_dir
-    set_active_run_dir(output_dir)
     save_json(output_dir / RUN_METADATA_FILE, metadata)
+    set_active_run_dir(output_dir)
     _setup_checklist_symlink(output_dir)
     return output_dir
 
