@@ -557,6 +557,30 @@ class RaptorConfig:
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "MISTRAL_API_KEY",
+        # Below: providers RAPTOR doesn't call directly today, but
+        # whose keys legitimately need to flow through if the
+        # operator wires up a custom dispatcher / aggregator. Pre-fix
+        # the missing entries meant `get_llm_env()` stripped these
+        # for our analysis scripts even when they were the only
+        # configured provider.
+        "GOOGLE_API_KEY",       # alternate Gemini env name
+        "GROQ_API_KEY",         # aggregator + family stem (batch 067)
+        "TOGETHER_API_KEY",     # aggregator
+        "OPENROUTER_API_KEY",   # aggregator
+        "FIREWORKS_API_KEY",    # aggregator
+        "DEEPINFRA_API_KEY",    # aggregator
+        "PERPLEXITY_API_KEY",   # aggregator
+        "REPLICATE_API_TOKEN",  # aggregator (uses _TOKEN suffix)
+        "COHERE_API_KEY",       # cohere family (batch 067)
+        # AWS / GCP / Azure cloud providers when used as LLM gateways
+        # (Bedrock, Vertex AI, Azure OpenAI). Operators routing
+        # through these need credentials to flow through.
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "GOOGLE_APPLICATION_CREDENTIALS",  # GCP service account JSON path
     )
 
     @staticmethod
