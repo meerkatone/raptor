@@ -344,12 +344,36 @@ def load_sarif(sarif_path: Path) -> Optional[Dict[str, Any]]:
 
     max_size = 100 * 1024 * 1024  # 100 MiB
 
+    # Stat-then-bounded-read. Pre-fix the function used
+    # `sarif_path.read_text()` followed by `if len(content) > max_size`
+    # — the WHOLE file was loaded into memory BEFORE the size check,
+    # so a 10 GB malformed/hostile SARIF file OOM-killed the process
+    # instead of being rejected. The "avoids TOCTOU" comment was
+    # technically true but irrelevant: the real risk here is memory
+    # exhaustion, not stat/read size-skew (a few KB drift between
+    # stat and read doesn't matter for the cap decision).
+    #
+    # Bounded read of `max_size + 1` bytes lets us detect "too large"
+    # without ever loading more than the cap into memory. Reading
+    # one extra byte is the standard "did we hit the limit" sentinel.
     try:
-        # Read then check size — avoids TOCTOU between stat() and read()
-        content = sarif_path.read_text()
-        if len(content) > max_size:
-            logger.error(f"SARIF: file too large ({len(content) / 1024 / 1024:.0f} MiB): {sarif_path}")
+        st = sarif_path.stat()
+        if st.st_size > max_size:
+            logger.error(
+                f"SARIF: file too large ({st.st_size / 1024 / 1024:.0f} MiB): "
+                f"{sarif_path}"
+            )
             return None
+        with sarif_path.open("rb") as f:
+            raw = f.read(max_size + 1)
+        if len(raw) > max_size:
+            # Race: file grew between stat and read.
+            logger.error(
+                f"SARIF: file grew past {max_size / 1024 / 1024:.0f} MiB "
+                f"during read: {sarif_path}"
+            )
+            return None
+        content = raw.decode("utf-8", errors="replace")
     except OSError as e:
         logger.warning(f"SARIF: could not read {sarif_path}: {e}")
         return None
