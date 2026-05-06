@@ -397,7 +397,23 @@ def dispatch_task(
                     with _nonces_lock:
                         nonce = _nonces.pop((item_id, model_key), "")
                     if nonce:
-                        model_id = getattr(model, "model_name", str(model))
+                        # When dispatching via CC (model=None,
+                        # cc_dispatch.invoke_cc_simple), `model` is
+                        # None and pre-fix `getattr(None,
+                        # "model_name", str(None))` produced the
+                        # literal string "None" as the telemetry
+                        # model_id. Per-model telemetry counters
+                        # then attributed every CC schema failure
+                        # to a phantom model called "None" instead
+                        # of "claude-code". Coerce the CC case to
+                        # the canonical "claude-code" string so
+                        # failure telemetry matches the success
+                        # path's `analysed_by` attribution
+                        # (cc_dispatch.py sets it to "claude-code").
+                        if model is None:
+                            model_id = "claude-code"
+                        else:
+                            model_id = getattr(model, "model_name", str(model))
                         defense_telemetry.record_response(
                             model_id=model_id,
                             profile_name=profile_name,
