@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Union
 
+from .availability import z3
 from .config import BVProfile
 
 
@@ -144,7 +145,8 @@ def parse_literal_value(tok: str, profile: BVProfile) -> Union[int, Rejection]:
     - Anything that isn't a clean hex or decimal literal
       → :data:`RejectionKind.UNRECOGNIZED_OPERAND`.
     """
-    if _HEX_LITERAL_RE.fullmatch(tok):
+    is_hex = bool(_HEX_LITERAL_RE.fullmatch(tok))
+    if is_hex:
         v = int(tok, 16)
     elif _DEC_LITERAL_RE.fullmatch(tok):
         if len(tok) > 1 and tok[0] == "0":
@@ -159,10 +161,43 @@ def parse_literal_value(tok: str, profile: BVProfile) -> Union[int, Rejection]:
             tok, RejectionKind.UNRECOGNIZED_OPERAND,
             f"token {tok!r} is not a hex or decimal literal",
         )
-    if v >= (1 << profile.width):
+    # Range check, with hex vs decimal distinction:
+    #
+    # * Hex literals are BIT PATTERNS. `0x80000000` at int32
+    #   profile represents the underlying bit pattern of -2^31,
+    #   which IS representable as signed int32 (just at the
+    #   negative end of two's complement). Allow up to 2^width
+    #   regardless of signedness — width caps what the bit
+    #   pattern can encode, signedness only changes how Z3
+    #   *interprets* the value during model rendering.
+    #
+    # * Decimal literals are NUMERICAL values. `200` at int8
+    #   profile (signed, range -128..127) doesn't fit even though
+    #   the bit pattern (0xC8) does — Z3 would silently
+    #   reinterpret it as -56, producing a verdict that didn't
+    #   match the source intent. Cap decimal literals at
+    #   2^(width-1) for signed profiles. (The regex rejects
+    #   leading '-', so we only see positive decimals here.)
+    #
+    # Pre-batch-210 the check used `v >= (1 << profile.width)`
+    # uniformly, which over-accepted decimal literals (the `200`
+    # at int8 case). Batch 210 over-corrected by tightening BOTH
+    # paths, which over-rejected hex literals like `0x80000000`
+    # at int32. This split restores hex support while keeping the
+    # decimal sign-discipline.
+    if is_hex or not profile.signed:
+        upper_exclusive = 1 << profile.width
+    else:
+        upper_exclusive = 1 << (profile.width - 1)
+    if v >= upper_exclusive:
+        if is_hex:
+            range_desc = f"{profile.width}-bit range"
+        else:
+            range_desc = f"{profile.describe()} positive range"
         return Rejection(
             tok, RejectionKind.LITERAL_OUT_OF_RANGE,
-            f"value {v:#x} exceeds {profile.width}-bit profile range",
+            f"value {v:#x} exceeds {range_desc} "
+            f"(max {upper_exclusive - 1:#x})",
         )
     return v
 
@@ -175,9 +210,22 @@ def classify_solver_unknown(solver: Any) -> RejectionKind:
     :data:`RejectionKind.SOLVER_UNKNOWN` (incomplete tactic, undecidable
     fragment, ...).
     """
+    # Catch the specific failure modes Z3 may exhibit — bare
+    # `except Exception` swallowed programming bugs introduced by
+    # future maintainers (AttributeError if `solver` is the wrong
+    # type, NameError, etc.) and silently mis-classified them as
+    # SOLVER_UNKNOWN. Z3's `reason_unknown` may legitimately raise
+    # `z3.Z3Exception` (no model available — solver hasn't been
+    # called yet; called after add() during reset; etc.) or
+    # `RuntimeError` from the wrapping in some Z3 builds. Also
+    # tolerate AttributeError specifically — caller passing None or
+    # a stub object is explicit-enough that we shouldn't crash, but
+    # narrower TypeError-level mismatches should propagate.
     try:
         reason = (solver.reason_unknown() or "").lower()
-    except Exception:
+    except (AttributeError,) + (
+        (z3.Z3Exception,) if hasattr(z3, "Z3Exception") else ()
+    ) + (RuntimeError,):
         return RejectionKind.SOLVER_UNKNOWN
     if "timeout" in reason or "canceled" in reason or "cancelled" in reason:
         return RejectionKind.SOLVER_TIMEOUT

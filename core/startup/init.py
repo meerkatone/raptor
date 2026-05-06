@@ -102,11 +102,29 @@ def _tighten_config_perms(path: Path) -> str | None:
         return (f"⚠ {path} not owned by current user "
                 f"(mode {oct(st.st_mode)[-3:]}). Fix perms manually.")
 
+    # Open with O_NOFOLLOW + fchmod to close a TOCTOU race. Pre-fix
+    # the sequence was `lstat` (not a symlink) → `os.chmod(path,
+    # 0o600)`. `os.chmod` follows symlinks. Between the lstat and
+    # the chmod, an attacker (or a careless install script) could
+    # swap the file for a symlink to e.g. `/etc/passwd` — our
+    # chmod would then change perms on the swap target. ELOOP from
+    # the kernel when the path is now a symlink → falls through to
+    # the OSError handler with a meaningful message.
     try:
-        os.chmod(path, 0o600)
+        fd = os.open(
+            str(path),
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as e:
+        return (f"⚠ {path} could not be opened for chmod: {e}. "
+                f"Run: chmod 600 {path}")
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError as e:
+        os.close(fd)
         return (f"⚠ {path} mode {oct(st.st_mode)[-3:]} and chmod failed: {e}. "
                 f"Run: chmod 600 {path}")
+    os.close(fd)
 
     return (f"tightened {path} permissions to 600 "
             f"(was {oct(st.st_mode)[-3:]}; contains API keys)")
@@ -212,8 +230,19 @@ def _test_key(provider: str, api_key: str, api_base: str = None) -> bool:
     timeout = 3
     try:
         if provider == "gemini":
+            # Use `x-goog-api-key` header rather than `?key=...` query
+            # parameter. Both are documented; the header form keeps the
+            # key out of any logs that capture URLs:
+            #   * Gemini's server-side access logs.
+            #   * Any HTTPS proxy in the path that captures CONNECT
+            #     URLs (uncommon but seen on corporate gateways).
+            #   * Downstream debugging tools (curl --trace, requests'
+            #     hooks, anything that re-renders the request line).
+            # The TLS encryption protects the bytes in transit; the
+            # logging exposure is at endpoints.
             r = requests.get(
-                f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"x-goog-api-key": api_key},
                 timeout=timeout,
             )
             return r.status_code == 200
@@ -296,10 +325,19 @@ def check_env(unavailable_features: set) -> tuple[list, list]:
     except OSError:
         pass
 
-    if os.getenv("RAPTOR_OUT_DIR"):
-        parts.append(f"RAPTOR_OUT_DIR={os.getenv('RAPTOR_OUT_DIR')}")
-    if os.getenv("RAPTOR_CONFIG"):
-        parts.append(f"RAPTOR_CONFIG={os.getenv('RAPTOR_CONFIG')}")
+    # Operator-supplied env values flow into the startup banner that
+    # gets printed to the terminal. A value containing ANSI escapes
+    # (`\x1b[2J`) blanks the terminal; a value with bidi controls
+    # visually re-orders the line; CR/LF splits across lines.
+    # Apply `escape_nonprintable` so dangerous bytes render as
+    # `\xHH` literals.
+    from core.security.log_sanitisation import escape_nonprintable
+    out_dir_env = os.getenv("RAPTOR_OUT_DIR")
+    if out_dir_env:
+        parts.append(f"RAPTOR_OUT_DIR={escape_nonprintable(out_dir_env)}")
+    config_env = os.getenv("RAPTOR_CONFIG")
+    if config_env:
+        parts.append(f"RAPTOR_CONFIG={escape_nonprintable(config_env)}")
 
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         warnings.append("/oss-forensics unavailable — BigQuery not configured")
@@ -403,9 +441,24 @@ def check_active_project() -> str | None:
         if not data:
             return None
         proj_target = data.get("target", "")
+        # Bounded read of the .auto marker. Pre-fix `read_text()`
+        # loaded the WHOLE file into memory before the strip+compare.
+        # The marker SHOULD only ever contain a project name (a few
+        # bytes) but if the file was malformed (a hostile sample, a
+        # corrupted sparse file, a symlink-to-/dev/zero) the unbounded
+        # read OOM-killed the entire startup banner. Read just enough
+        # bytes to compare against `name + 1` so any oversize file
+        # rejects via the comparison.
         auto_marker = PROJECTS_DIR / ".auto"
-        if auto_marker.exists() and auto_marker.read_text().strip() == name:
-            return f"Auto-activated project: {name} ({proj_target}) — `/project none` to clear"
+        if auto_marker.exists():
+            try:
+                cap = max(len(name) + 64, 256)
+                with auto_marker.open("rb") as fh:
+                    head = fh.read(cap)
+                if head.decode("utf-8", errors="replace").strip() == name:
+                    return f"Auto-activated project: {name} ({proj_target}) — `/project none` to clear"
+            except OSError:
+                pass
         return f"Project: {name} ({proj_target}) — `/project none` to clear"
     except Exception:
         return None

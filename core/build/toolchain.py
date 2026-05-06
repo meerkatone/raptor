@@ -127,7 +127,19 @@ def detect_GOROOT() -> Optional[str]:
 def detect_DOTNET_ROOT() -> Optional[str]:
     """Resolve DOTNET_ROOT: dotnet is installed with `dotnet` at the
     root, not under a bin/ subdir on most distros — strip only the
-    trailing filename."""
+    trailing filename.
+
+    Refuses the filesystem root ``/`` and the user's ``$HOME``:
+      * ``/`` happens when dotnet is installed AS `/dotnet` (some
+        minimal container layouts). Setting `DOTNET_ROOT=/` makes
+        dotnet scan the entire filesystem for SDKs and can
+        legitimately try to write workload metadata into ``/``.
+      * ``$HOME`` happens when a custom layout puts the dotnet
+        binary directly in the user's home (`~/dotnet`).
+        DOTNET_ROOT then refers to the whole home directory —
+        dotnet writes workload state and tooling cache into the
+        home root instead of a scoped install dir.
+    """
     found = shutil.which("dotnet")
     if not found:
         return None
@@ -136,9 +148,21 @@ def detect_DOTNET_ROOT() -> Optional[str]:
     except OSError:
         return None
     root = os.path.dirname(real)
-    if root and os.path.isdir(root):
-        return root
-    return None
+    if not root or not os.path.isdir(root):
+        return None
+    # Refuse the filesystem root and HOME exactly.
+    # `os.path.normpath` rather than `os.path.realpath` for the HOME
+    # comparison: realpath was already invoked above on the original
+    # binary, so `root` already reflects symlink resolution. Re-running
+    # realpath here would unnecessarily stat HOME and complicate the
+    # tests that mock `os.path.realpath` to return a fixed value
+    # regardless of input.
+    if root == os.sep:
+        return None
+    home = os.environ.get("HOME")
+    if home and os.path.normpath(root) == os.path.normpath(home):
+        return None
+    return root
 
 
 def detect_RUSTUP_HOME() -> Optional[str]:
@@ -205,16 +229,38 @@ def apply_toolchain_env(env: Dict[str, str],
                 f"entry {name!r}. Add a detect_{name}() helper or "
                 f"remove the name from BUILD_SYSTEMS.env_detect."
             )
-        # Treat any detector exception as "not found" rather than
+        # Treat detector failures as "not found" rather than
         # propagating — a detector crash on an exotic distro (odd
-        # filesystem, broken shutil.which) should NOT take out the
-        # whole build. The warning below tells operators what happened.
+        # filesystem, broken shutil.which, subprocess timeout)
+        # should NOT take out the whole build.
+        #
+        # Two-tier logging:
+        #   * Expected failure classes (OSError, subprocess.*,
+        #     TimeoutError) log at WARNING — these happen in the
+        #     wild on legitimate broken hosts and aren't actionable.
+        #   * Anything else (AttributeError from a typo, NameError
+        #     from a refactor, TypeError from wrong return shape) is
+        #     almost certainly a programming bug — log at ERROR with
+        #     exc_info so the traceback surfaces in CI / dev. Pre-fix
+        #     ALL exception types logged at WARNING with no
+        #     traceback, silently masking real bugs introduced by
+        #     detector edits.
+        import subprocess
+        expected_failures = (OSError, subprocess.SubprocessError, TimeoutError)
         try:
             value = DETECTORS[name]()
-        except Exception as e:
+        except expected_failures as e:
             logger.warning(
                 f"build toolchain: detector for {name} raised "
                 f"{type(e).__name__}: {e} — treating as not found."
+            )
+            value = None
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "build toolchain: detector for %s raised "
+                "unexpected %s: %s — treating as not found "
+                "(this is likely a programming bug, see traceback)",
+                name, type(e).__name__, e, exc_info=True,
             )
             value = None
         if value is None:

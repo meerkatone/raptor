@@ -404,6 +404,20 @@ class RaptorConfig:
         "CURL_CA_BUNDLE",      # curl trust anchor override.
         "SSL_CERT_FILE",       # OpenSSL-based tools' trust anchor override.
         "SSL_CERT_DIR",        # OpenSSL-based tools' trust anchor dir.
+        # Allocator config — both glibc and jemalloc honour these env
+        # vars. They can enable allocator features (verbose stats,
+        # core dumps on detected corruption, profiling output paths)
+        # that an attacker can use to (a) leak memory contents into
+        # log files at predictable paths, (b) cause core dumps that
+        # may contain credentials, (c) redirect heap profile output
+        # to attacker-writable paths.
+        "MALLOC_CONF",         # jemalloc configuration string.
+        "JE_MALLOC_CONF",      # alternate jemalloc env var (some builds).
+        "MALLOC_CHECK_",       # glibc heap consistency check; high values
+                               # write to stderr → log injection.
+        "MALLOC_PERTURB_",     # glibc fill-pattern; not security-critical
+                               # alone but lets an attacker influence
+                               # uninitialised-memory disclosure ABI.
         # Note: TERM is NOT stripped — it's read as a string (terminfo lookup),
         # not shell-evaluated. Stripping it breaks colour output in git/grep/etc.
     ]
@@ -454,23 +468,37 @@ class RaptorConfig:
         """
         Resolve the output directory, honoring RAPTOR_OUT_DIR environment variable.
 
-        Warns if the output directory is a system path that could be dangerous.
+        Refuses system paths that could be dangerous. Pre-fix this
+        WARNED but still returned the resolved path — the operator's
+        next `mkdir(out_dir, ...)` then created or polluted system
+        directories. Refuse outright with ValueError so the caller
+        sees the misconfiguration immediately and can correct
+        RAPTOR_OUT_DIR before any filesystem damage.
+
+        Match prefixes on path-component boundary so `/usr-local-foo`
+        doesn't false-match the `/usr` rule.
 
         Returns:
             Path: Resolved output directory path
+
+        Raises:
+            ValueError: when RAPTOR_OUT_DIR points at a system prefix.
         """
         base = os.environ.get(RaptorConfig.ENV_OUT_DIR)
         if not base:
             return RaptorConfig.BASE_OUT_DIR
         resolved = Path(base).resolve()
         forbidden = ("/etc", "/usr", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys")
+        resolved_str = str(resolved)
         for prefix in forbidden:
-            if str(resolved).startswith(prefix):
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"RAPTOR_OUT_DIR points to system path {resolved} — this is likely a misconfiguration"
+            # Component-boundary match: equals or starts with `prefix/`.
+            if resolved_str == prefix or resolved_str.startswith(prefix + "/"):
+                raise ValueError(
+                    f"RAPTOR_OUT_DIR={resolved!r} resolves under system "
+                    f"path {prefix!r}. Refusing to create output there. "
+                    f"Set RAPTOR_OUT_DIR to a path under your home or a "
+                    f"dedicated work directory."
                 )
-                break
         return resolved
 
     @staticmethod
@@ -529,6 +557,30 @@ class RaptorConfig:
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "MISTRAL_API_KEY",
+        # Below: providers RAPTOR doesn't call directly today, but
+        # whose keys legitimately need to flow through if the
+        # operator wires up a custom dispatcher / aggregator. Pre-fix
+        # the missing entries meant `get_llm_env()` stripped these
+        # for our analysis scripts even when they were the only
+        # configured provider.
+        "GOOGLE_API_KEY",       # alternate Gemini env name
+        "GROQ_API_KEY",         # aggregator + family stem (batch 067)
+        "TOGETHER_API_KEY",     # aggregator
+        "OPENROUTER_API_KEY",   # aggregator
+        "FIREWORKS_API_KEY",    # aggregator
+        "DEEPINFRA_API_KEY",    # aggregator
+        "PERPLEXITY_API_KEY",   # aggregator
+        "REPLICATE_API_TOKEN",  # aggregator (uses _TOKEN suffix)
+        "COHERE_API_KEY",       # cohere family (batch 067)
+        # AWS / GCP / Azure cloud providers when used as LLM gateways
+        # (Bedrock, Vertex AI, Azure OpenAI). Operators routing
+        # through these need credentials to flow through.
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "GOOGLE_APPLICATION_CREDENTIALS",  # GCP service account JSON path
     )
 
     @staticmethod

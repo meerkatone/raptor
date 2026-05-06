@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -189,6 +190,13 @@ def _validate_value(key: str, raw: Any) -> Optional[int]:
     min_val = 0 if key in _ZERO_ALLOWED else 1
     if isinstance(raw, int) and not isinstance(raw, bool) and raw >= min_val:
         return raw
+    # Accept integer-valued floats (`4.0`, `8.0`) — JSON has no
+    # int/float distinction at the wire level, and many editors /
+    # config tools emit `4.0` when the user types `4`. Pre-fix
+    # the strict `isinstance(raw, int)` rejected these and used
+    # the default, masking the operator's intent.
+    if isinstance(raw, float) and raw.is_integer() and raw >= min_val:
+        return int(raw)
     logger.warning(
         'tuning.json: "%s" must be "auto" or a positive integer, '
         "using default (%s)",
@@ -234,7 +242,19 @@ def load_tuning(path: Optional[Path] = None) -> Tuning:
 
 
 def _create_default_file(path: Path) -> None:
-    """Write the shipped-default tuning.json for discoverability."""
+    """Write the shipped-default tuning.json for discoverability.
+
+    Uses an atomic write (write to `.tmp.<pid>` sibling, then
+    rename) so that:
+      * A concurrent reader (libexec/raptor-tune, get_tuning's
+        re-load) can never observe a half-written file.
+      * Crash mid-write doesn't leave a corrupt tuning.json that
+        every subsequent get_tuning() trip-falls over.
+      * Two concurrent writers (this function + raptor-tune CLI
+        racing) don't share a tempfile path — pid suffix
+        disambiguates so each writer's tmp survives until its own
+        rename, and the final rename is last-writer-wins.
+    """
     try:
         # Import here to avoid circular dep with libexec/raptor-tune
         # which also writes this file. Use the same format.
@@ -258,13 +278,34 @@ def _create_default_file(path: Path) -> None:
         for entry, comment in entries:
             lines.append(f"{entry:<{col}}// {comment}")
         lines.append("}")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        content = "\n".join(lines) + "\n"
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
+        except BaseException:
+            # Clean up partial tmp on any failure (including
+            # KeyboardInterrupt mid-write) so the next call doesn't
+            # find an orphan and racers don't see stale tmp files
+            # piling up.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass
 
 
 _cached: Optional[Tuning] = None
 _cached_stat: Optional[tuple] = None  # (st_mtime_ns, st_size)
+# Lock around the cache check + update. Pre-fix `get_tuning` was
+# racy: two threads calling it concurrently could both see
+# `_cached is None`, both call `load_tuning()` (file I/O + JSON
+# parse), both write to the cache. Worse, the WINNING write could
+# be the older one if the threads interleaved between the assigns.
+# Holding the lock briefly serialises check-then-update.
+_cached_lock = threading.Lock()
 
 
 def _file_stat(path: Path) -> Optional[tuple]:
@@ -276,13 +317,22 @@ def _file_stat(path: Path) -> Optional[tuple]:
 
 
 def get_tuning() -> Tuning:
-    """Return tuning values, re-reading only when the file changes."""
+    """Return tuning values, re-reading only when the file changes.
+
+    Thread-safe via `_cached_lock`. Pre-fix the check-then-update
+    sequence was racy across threads — two callers could both
+    observe `_cached is None`, both issue a file read + JSON parse,
+    both write to the cache. The winning write was order-dependent
+    and could be older than the loser. Hold the lock briefly to
+    serialise.
+    """
     global _cached, _cached_stat
     current = _file_stat(_TUNING_PATH)
-    if _cached is None or current != _cached_stat:
-        _cached = load_tuning()
-        _cached_stat = current
-    return _cached
+    with _cached_lock:
+        if _cached is None or current != _cached_stat:
+            _cached = load_tuning()
+            _cached_stat = current
+        return _cached
 
 
 __all__ = ["Tuning", "get_tuning", "load_tuning"]

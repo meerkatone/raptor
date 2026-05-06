@@ -16,6 +16,20 @@ from typing import Any, Dict, Optional
 from core.config import RaptorConfig
 
 
+# Reserved attribute names on `logging.LogRecord`. Any kwarg with a
+# colliding name passed via `extra=` causes
+# `logging.makeRecord` → `KeyError: "Attempt to overwrite '<name>'
+# in LogRecord"`. RaptorLogger filters these and renames colliders
+# with an `extra_` prefix.
+_RESERVED_LOGRECORD_NAMES = frozenset({
+    "name", "msg", "args", "levelname", "levelno",
+    "pathname", "filename", "module", "exc_info", "exc_text",
+    "stack_info", "lineno", "funcName", "created", "msecs",
+    "relativeCreated", "thread", "threadName", "processName",
+    "process", "message", "asctime",
+})
+
+
 class JSONFormatter(logging.Formatter):
     """Format log records as JSON for structured logging."""
 
@@ -29,8 +43,18 @@ class JSONFormatter(logging.Formatter):
         Returns:
             JSON string representation of log record
         """
+        # ISO 8601 with timezone offset rather than the legacy
+        # `%Y-%m-%d %H:%M:%S,xxx` format from `formatTime`. ISO is
+        # the canonical form across the codebase (matches every
+        # other tz-aware timestamp emitted by run/metadata,
+        # sandbox/audit, telemetry — see batches 154, 173). Mixed
+        # formats in the JSONL audit trail force consumers to
+        # parse two date shapes.
+        from datetime import datetime, timezone
         log_obj: Dict[str, Any] = {
-            "timestamp": self.formatTime(record, self.datefmt),
+            "timestamp": datetime.fromtimestamp(
+                record.created, tz=timezone.utc,
+            ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "module": record.module,
@@ -51,7 +75,15 @@ class JSONFormatter(logging.Formatter):
         if hasattr(record, "duration"):
             log_obj["duration"] = record.duration
 
-        return json.dumps(log_obj)
+        # `default=str` so non-JSON-native types in `extra` (Path,
+        # datetime, UUID, custom dataclass repr) serialise as their
+        # string form instead of crashing the format() call with
+        # `TypeError: Object of type X is not JSON serializable`.
+        # Pre-fix a single such kwarg from any caller anywhere
+        # killed the audit-trail write for that record AND every
+        # subsequent record in the same handler buffer (logging's
+        # default error handler doesn't recover the formatter).
+        return json.dumps(log_obj, default=str)
 
 
 class RaptorLogger:
@@ -90,8 +122,25 @@ class RaptorLogger:
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
 
-        # File handler with JSON formatting for audit trail
-        log_file = RaptorConfig.LOG_DIR / f"raptor_{int(time.time())}.jsonl"
+        # File handler with JSON formatting for audit trail.
+        #
+        # Filename includes PID and a 4-digit monotonic-ns tail
+        # alongside the wall-clock second. Pre-fix the name was just
+        # `raptor_<unix_seconds>.jsonl` — two RAPTOR processes
+        # starting in the same wall-clock second computed identical
+        # filenames. `logging.FileHandler` opens with mode "a"
+        # (append), so the two processes' logs interleaved into one
+        # file with no PID separator — operators couldn't reconstruct
+        # which line came from which run.
+        #
+        # Same shape as `core/run/output.unique_run_suffix` (batch
+        # 143): wall-clock second + pid + 4-digit monotonic-ns tail.
+        import os as _os
+        ns_tail = time.monotonic_ns() % 10_000
+        log_file = (
+            RaptorConfig.LOG_DIR
+            / f"raptor_{int(time.time())}_pid{_os.getpid()}_{ns_tail:04d}.jsonl"
+        )
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)
         json_formatter = JSONFormatter()
@@ -102,33 +151,57 @@ class RaptorLogger:
 
         self.debug(f"RAPTOR logging initialized - audit trail: {log_file}")
 
-    def debug(self, message: str, **kwargs: Any) -> None:
-        """Log debug message."""
-        # Extract reserved parameters that must not be in extra dict
+    def _split_kwargs(self, kwargs: dict) -> tuple:
+        """Separate caller kwargs into:
+          * `exc_info` / `stack_info` (logger-call params).
+          * `extra` dict (the rest), with reserved LogRecord attribute
+            names filtered out.
+
+        Pre-fix only `exc_info` / `stack_info` were popped before
+        passing kwargs as `extra=`. Python's `logging.makeRecord`
+        raises KeyError if `extra` contains any name that collides
+        with a reserved LogRecord attribute (`name`, `message`,
+        `asctime`, `levelname`, `pathname`, `lineno`, `funcName`,
+        `created`, `msecs`, `relativeCreated`, `thread`, `threadName`,
+        `processName`, `process`, `args`, `levelno`, `module`,
+        `filename`, `exc_text`). A caller passing `logger.info("hi",
+        name="alice")` crashed with `KeyError: "Attempt to overwrite
+        'name' in LogRecord"` — common because `name` is a natural
+        kwarg name for many log payloads.
+
+        Filter and rename: collisions get prefixed with `extra_` so
+        the value still surfaces in the structured output instead
+        of crashing the call.
+        """
         exc_info = kwargs.pop('exc_info', False)
         stack_info = kwargs.pop('stack_info', False)
-        self.logger.debug(message, extra=kwargs, exc_info=exc_info, stack_info=stack_info)
+        extra = {}
+        for k, v in kwargs.items():
+            if k in _RESERVED_LOGRECORD_NAMES:
+                extra[f"extra_{k}"] = v
+            else:
+                extra[k] = v
+        return exc_info, stack_info, extra
+
+    def debug(self, message: str, **kwargs: Any) -> None:
+        """Log debug message."""
+        exc_info, stack_info, extra = self._split_kwargs(kwargs)
+        self.logger.debug(message, extra=extra, exc_info=exc_info, stack_info=stack_info)
 
     def info(self, message: str, **kwargs: Any) -> None:
         """Log info message."""
-        # Extract reserved parameters that must not be in extra dict
-        exc_info = kwargs.pop('exc_info', False)
-        stack_info = kwargs.pop('stack_info', False)
-        self.logger.info(message, extra=kwargs, exc_info=exc_info, stack_info=stack_info)
+        exc_info, stack_info, extra = self._split_kwargs(kwargs)
+        self.logger.info(message, extra=extra, exc_info=exc_info, stack_info=stack_info)
 
     def warning(self, message: str, **kwargs: Any) -> None:
         """Log warning message."""
-        # Extract reserved parameters that must not be in extra dict
-        exc_info = kwargs.pop('exc_info', False)
-        stack_info = kwargs.pop('stack_info', False)
-        self.logger.warning(message, extra=kwargs, exc_info=exc_info, stack_info=stack_info)
+        exc_info, stack_info, extra = self._split_kwargs(kwargs)
+        self.logger.warning(message, extra=extra, exc_info=exc_info, stack_info=stack_info)
 
     def error(self, message: str, **kwargs: Any) -> None:
         """Log error message."""
-        # Extract reserved parameters that must not be in extra dict
-        exc_info = kwargs.pop('exc_info', False)
-        stack_info = kwargs.pop('stack_info', False)
-        self.logger.error(message, extra=kwargs, exc_info=exc_info, stack_info=stack_info)
+        exc_info, stack_info, extra = self._split_kwargs(kwargs)
+        self.logger.error(message, extra=extra, exc_info=exc_info, stack_info=stack_info)
 
     def critical(self, message: str, **kwargs: Any) -> None:
         """Log critical message."""
@@ -170,6 +243,35 @@ class RaptorLogger:
 
 
 # Global logger instance
-def get_logger() -> RaptorLogger:
-    """Get the global RAPTOR logger instance."""
-    return RaptorLogger()
+def get_logger(name: Optional[str] = None) -> "logging.Logger":
+    """Get a RAPTOR logger.
+
+    With no `name` (default): returns the singleton RaptorLogger
+    wrapper for the framework's audit-trail behaviour.
+
+    With a `name`: returns a `logging.Logger` child of "raptor"
+    namespaced under that name, e.g. `get_logger("core.sarif")`
+    returns `logging.getLogger("raptor.core.sarif")`. Lets modules
+    distinguish their log lines for grep-by-source while still
+    inheriting the framework's handler / formatter configuration
+    (Python logging propagates from child to parent by default,
+    so the audit-trail file handler still picks up child logs as
+    long as `propagate=True`).
+
+    Pre-fix `get_logger()` accepted no args — every caller got the
+    same flat-namespace singleton, making it impossible to filter
+    logs by source module without textual greps. Modules that DID
+    want a per-module logger had to bypass `get_logger` entirely
+    and call `logging.getLogger(__name__)` directly, defeating the
+    centralisation.
+    """
+    # Always ensure the base singleton is initialised first
+    # (handlers attached, audit file open) before any caller
+    # creates a child logger that needs to inherit from it.
+    base = RaptorLogger()
+    if name is None:
+        return base
+    # Namespace under "raptor" so child propagation reaches the
+    # audit handlers attached to the base "raptor" logger.
+    safe_name = name if name.startswith("raptor.") else f"raptor.{name}"
+    return logging.getLogger(safe_name)

@@ -258,13 +258,36 @@ class ProjectManager:
             raise ValueError(f"Project '{name}' not found")
 
         if purge and project.output_path.exists():
-            # Safety: refuse to delete paths that could cause serious damage
+            # Safety: refuse to delete paths that could cause serious damage.
+            #
+            # The existing checks (== home, == /, < 3 parts, ancestor of
+            # home) catch the most obvious targets, but an attacker with
+            # write access to the project JSON could set
+            # `output_dir = "/etc"` or `"/usr/share/foo"` — none of those
+            # match the simple checks but rmtree of any of them is
+            # catastrophic.
+            #
+            # Add a containment check: refuse to rmtree any path that
+            # ISN'T inside the expected output base (DEFAULT_OUTPUT_BASE
+            # — `out/projects` resolved). Operators with custom
+            # output_dirs outside that base will need to clean by hand;
+            # the trade-off is correct because the alternative (trust
+            # the project JSON) is exactly the attack surface.
             output = project.output_path.resolve()
             home = Path.home().resolve()
             if (output == home or output == Path("/")
                     or len(output.parts) < 3
                     or str(home).startswith(str(output) + "/")):
                 raise ValueError(f"Refusing to delete suspicious path: {output}")
+            expected_base = DEFAULT_OUTPUT_BASE.resolve()
+            try:
+                output.relative_to(expected_base)
+            except ValueError:
+                raise ValueError(
+                    f"Refusing to delete output path {output} outside the "
+                    f"expected base {expected_base}. Use --no-purge or "
+                    f"clean the directory by hand."
+                )
             shutil.rmtree(project.output_path)
             logger.info(f"Deleted output directory: {project.output_dir}")
 
@@ -292,10 +315,35 @@ class ProjectManager:
         # Update project
         project.name = new_name
 
-        # Save new, delete old
+        # Save new, delete old.
+        # Pre-fix the unlink used `missing_ok=True` which silently
+        # swallowed every OSError including PermissionError. If the
+        # save_json succeeded but the unlink failed, the project
+        # ended up existing under BOTH names with no signal to the
+        # operator — every subsequent list/load saw two entries
+        # for what was supposed to be one project. Use os.replace
+        # to atomically move old → new, then re-write with updated
+        # content. Falls back to save+unlink with EXPLICIT error
+        # reporting if replace isn't atomic on the platform (cross-
+        # filesystem rename).
         save_json(new_file, project.to_dict())
         old_file = self.projects_dir / f"{old_name}.json"
-        old_file.unlink(missing_ok=True)
+        try:
+            old_file.unlink()
+        except FileNotFoundError:
+            pass  # already gone — fine
+        except OSError as e:
+            # Don't roll back the new file: it has the renamed
+            # content and is the source of truth going forward.
+            # But surface the failure so the operator knows the
+            # old file is still on disk and they need to clean it
+            # up by hand.
+            logger.error(
+                "rename: wrote new project file %s but failed to remove "
+                "old %s: %s. Both files now exist; remove %s manually.",
+                new_file, old_file, e, old_file,
+            )
+            raise
 
         # Update .active symlink if it pointed to the old name
         active_link = self.projects_dir / ".active"

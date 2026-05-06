@@ -292,7 +292,22 @@ class ConsensusTask(DispatchTask):
 
                 n_consensus = len(consensus_analyses)
                 if n_consensus == 1:
-                    final = primary_exploitable
+                    # 1-vote dispute: take the conservative max
+                    # (treat as exploitable if EITHER the primary
+                    # OR the consensus model says so). Pre-fix
+                    # the disputed case kept the primary verdict
+                    # silently — so when the consensus model
+                    # FLAGGED a previously-missed exploitable
+                    # path, the dispute was recorded for
+                    # operator review but the actual ruling
+                    # stayed "not exploitable" and the finding
+                    # was deprioritised. Conservative-max
+                    # matches CrossFamilyCheckTask's pattern
+                    # ("takes the conservative (exploitable)
+                    # verdict and flags `cross_family_disputed`")
+                    # so consensus and cross-family handle
+                    # disputes the same way.
+                    final = any(verdicts)  # True if any voter says exploitable
                 else:
                     final = sum(1 for v in verdicts if v) > len(verdicts) / 2
 
@@ -741,14 +756,59 @@ class RetryTask(AnalysisTask):
             except (ValueError, TypeError):
                 score = None
 
-            was_contradictory = prior_results.get(fid, {}).get("self_contradictory")
+            prior = prior_results.get(fid, {})
+            was_contradictory = prior.get("self_contradictory")
             decisive = score is not None and not (self.LOW <= score <= self.HIGH)
 
             if was_contradictory or decisive:
-                prior_results[fid] = r
-            prior_results[fid]["retried"] = True
+                # Merge instead of replace. Pre-fix this was
+                # `prior_results[fid] = r` which wholesale
+                # discarded every annotation earlier pipeline
+                # stages had attached: `_nonce_leaked` (defense
+                # telemetry), `_quality` (response validation),
+                # `cross_family_check` (CrossFamilyCheckTask
+                # verdict + checker_model + trigger),
+                # `contradictions` (self-consistency check
+                # output). Downstream consumers (judge,
+                # consensus, reporting) lost the audit trail
+                # for any finding that hit the retry loop.
+                # Take the new analysis content as the base and
+                # graft back annotation keys (underscore-prefix
+                # convention + the named cross-pipeline ones).
+                merged = dict(r)
+                _ANNOTATION_KEYS = {
+                    "cross_family_check", "contradictions",
+                    "self_contradictory",
+                }
+                for k, v in prior.items():
+                    if k.startswith("_") or k in _ANNOTATION_KEYS:
+                        # Don't let new result override an
+                        # annotation if both happen to set it;
+                        # underscore keys are pipeline-internal
+                        # state, the prior write is authoritative.
+                        if k not in merged:
+                            merged[k] = v
+                        elif k.startswith("_"):
+                            merged[k] = v  # pipeline state — prior wins.
+                prior_results[fid] = merged
+            # setdefault before sub-key mutation. Pre-fix
+            # `prior_results[fid]["retried"] = True` raised
+            # KeyError when the retry-result fid wasn't already
+            # in prior_results — a documented invariant of
+            # select_items but not enforced anywhere. Two real
+            # ways this gets violated:
+            #   (1) Caller filters prior_results between
+            #       select_items() and finalize() (e.g. drops
+            #       findings that exhausted budget mid-stage).
+            #   (2) Tests construct results lists directly
+            #       without populating prior_results, exposing
+            #       the mutation as a silent test failure.
+            # `setdefault({})` makes the mutation safe in either
+            # case — no behaviour change for the common path.
+            entry = prior_results.setdefault(fid, {})
+            entry["retried"] = True
             if not was_contradictory and not decisive:
-                prior_results[fid]["low_confidence"] = True
+                entry["low_confidence"] = True
         return results
 
 

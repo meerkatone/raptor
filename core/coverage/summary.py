@@ -435,6 +435,14 @@ def compute_project_summary(project) -> Optional[Dict[str, Any]]:
                 "tool": tool,
                 "files_examined": set(),
                 "functions_analysed": [],
+                # Maintain a parallel seen-set for the
+                # functions_analysed list. Pre-fix the dedup check
+                # rebuilt a fresh set comprehension over the entire
+                # list on EVERY incoming entry — O(N²) for N total
+                # functions across all records. Projects with a few
+                # thousand functions across multiple runs spent
+                # multiple seconds in this single line.
+                "_func_keys": set(),
                 "rules_applied": set(),
                 "packs": set(),
                 "files_failed": [],
@@ -444,8 +452,9 @@ def compute_project_summary(project) -> Optional[Dict[str, Any]]:
             m["files_examined"].add(f)
         for fa in record.get("functions_analysed", []):
             key = (fa.get("file", ""), fa.get("function", ""))
-            if key not in {(x.get("file"), x.get("function")) for x in m["functions_analysed"]}:
+            if key not in m["_func_keys"]:
                 m["functions_analysed"].append(fa)
+                m["_func_keys"].add(key)
         for r in record.get("rules_applied", []):
             m["rules_applied"].add(r)
         for p in record.get("packs", []):
@@ -503,8 +512,13 @@ def _match_to_inventory(path: str, inventory_paths: set) -> Optional[str]:
     if path in inventory_paths:
         return path
 
-    # Strip leading ./
-    stripped = path.lstrip("./")
+    # Strip leading ./ — `lstrip("./")` would strip ANY leading
+    # `.` or `/` character (set semantics, not prefix), so:
+    #   * `.foo.py` (hidden file) → `foo.py` (wrong inventory key)
+    #   * `//abs/path` (double slash from a careless join) → `abs/path`
+    #   * `...etc` → `etc`
+    # `removeprefix` only strips the literal prefix once.
+    stripped = path.removeprefix("./")
     if stripped in inventory_paths:
         return stripped
 
@@ -514,9 +528,27 @@ def _match_to_inventory(path: str, inventory_paths: set) -> Optional[str]:
     if len(matches) == 1:
         return matches[0]
 
-    # Try suffix matching (tool may report relative to different root)
+    # Try suffix matching (tool may report relative to different root).
+    # Pre-fix this used plain `str.endswith` — produced false matches
+    # whenever the shorter path's first component happened to be a
+    # SUFFIX of a longer path's component (not a separate component):
+    #   * `foo.py` matched `src/notfoo.py` (the latter ENDS WITH the
+    #     literal string "foo.py").
+    #   * `lib/x.py` matched `sublib/x.py` (the latter ends with
+    #     "lib/x.py" because "sublib" ends with "lib").
+    # Path-component-aware match: the suffix must align on a `/`
+    # separator boundary OR equal the whole longer path.
+    def _path_suffix_match(longer: str, shorter: str) -> bool:
+        if longer == shorter:
+            return True
+        if not longer.endswith(shorter):
+            return False
+        # Char immediately preceding the suffix must be a separator
+        # so the boundary aligns on a path component.
+        return longer[len(longer) - len(shorter) - 1] == "/"
+
     for inv_path in inventory_paths:
-        if inv_path.endswith(path) or path.endswith(inv_path):
+        if _path_suffix_match(inv_path, path) or _path_suffix_match(path, inv_path):
             return inv_path
 
     return None
