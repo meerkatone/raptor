@@ -519,8 +519,18 @@ def orchestrate(
                 full = (system_prompt + "\n\n" + prompt) if system_prompt else prompt
                 return invoke_cc_simple(full, schema, repo_path, claude_bin, out_dir)
 
+            # Carry the per-model intersected profile into the
+            # CC-fallback AnalysisTask. Pre-fix `AnalysisTask()`
+            # (no kwargs) used the default CONSERVATIVE profile,
+            # silently losing the defences the prior probe phase
+            # had validated for the actual model being dispatched.
+            # Most CC sub-agents are Claude → ANTHROPIC_CLAUDE
+            # (datamarking + base64_code enabled) so the fallback
+            # path was running with weaker defences than the
+            # primary path even though the same Claude model was
+            # behind it.
             analysis_results = dispatch_task(
-                AnalysisTask(), findings, dispatch_fn, role_resolution,
+                AnalysisTask(profile=profile), findings, dispatch_fn, role_resolution,
                 results_by_id, cost_tracker, max_parallel,
             )
 
