@@ -377,6 +377,21 @@ class CrashAnalysisAgent:
                 logger.info("No external LLM available — skipping crash analysis")
                 return False
 
+            # Validate response quality before consuming. Other
+            # dispatch paths run validate_structured_response
+            # to score completeness; this site bypassed it,
+            # consuming partially-empty / malformed analyses
+            # straight into crash_context. Add the same gate.
+            from core.llm.response_validation import validate_structured_response
+            validated = validate_structured_response(analysis, analysis_schema)
+            analysis = validated.data
+            if validated.quality < 0.3:
+                logger.warning(
+                    "Low-quality crash analysis (q=%.2f), incomplete: %s — "
+                    "consuming anyway but verdicts may be unreliable",
+                    validated.quality, validated.incomplete,
+                )
+
             # Update crash context
             crash_context.exploitability = "exploitable" if analysis.get("is_exploitable") else "not_exploitable"
             crash_context.crash_type = analysis.get("crash_type", "unknown")
@@ -389,8 +404,19 @@ class CrashAnalysisAgent:
             logger.info(f"  Crash Type: {analysis.get('crash_type', 'unknown')}")
             logger.info(f"  Severity: {analysis.get('severity_assessment', 'unknown')}")
             logger.info(f"  CVSS: {analysis.get('cvss_estimate', 0.0)}")
-            if analysis.get('attack_scenario'):
-                logger.info(f"  Attack: {analysis.get('attack_scenario')[:150]}...")
+            attack_scenario = analysis.get('attack_scenario')
+            if attack_scenario:
+                # Coerce to str — pre-fix `attack_scenario[:150]`
+                # silently sliced lists (returning the first 150
+                # elements as a list, then formatted via
+                # __repr__ — wrong shape for a log line) and
+                # raised TypeError on dicts/numbers. LLMs returning
+                # the wrong type for a "string" schema field
+                # happens frequently enough (lists of bullet
+                # points returned where prose was asked) that
+                # crashing the whole crash-analysis flow on a
+                # logging line is a poor failure mode.
+                logger.info(f"  Attack: {str(attack_scenario)[:150]}...")
             
             # Log some reasoning from the full response
             if full_response:
