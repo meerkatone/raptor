@@ -312,6 +312,18 @@ class ConsensusTask(DispatchTask):
                     final = sum(1 for v in verdicts if v) > len(verdicts) / 2
 
                 primary["consensus"] = "disputed" if disputed else "agreed"
+                # Capture pre-consensus verdict before overriding,
+                # so JudgeTask (which runs AFTER consensus) can show
+                # the judge what the primary analyst actually
+                # concluded — not the consensus-modified value.
+                # Pre-fix the judge saw `primary["is_exploitable"]`
+                # already overridden by consensus, making the
+                # judge's "do you agree with the primary?"
+                # critique structurally impossible to execute on
+                # any disputed finding (judge sees consensus's
+                # answer, not primary's).
+                if "pre_consensus_is_exploitable" not in primary:
+                    primary["pre_consensus_is_exploitable"] = primary_exploitable
                 primary["is_exploitable"] = final
                 primary["consensus_analyses"] = [
                     {"model": ca.get("analysed_by", "?"),
@@ -371,7 +383,16 @@ class JudgeTask(DispatchTask):
         fid = finding.get("finding_id")
         primary = self.results_by_id.get(fid, {})
         primary_reasoning = (primary.get("reasoning") or "")[:2000]
-        primary_verdict = primary.get("is_exploitable", "unknown")
+        # Use pre-consensus verdict if ConsensusTask ran first
+        # and stored it. Pre-fix `primary.get("is_exploitable")`
+        # showed the post-consensus value to the judge, making it
+        # structurally impossible for the judge to critique the
+        # primary analyst's ORIGINAL conclusion on any finding
+        # consensus had touched.
+        primary_verdict = primary.get(
+            "pre_consensus_is_exploitable",
+            primary.get("is_exploitable", "unknown"),
+        )
         primary_ruling = primary.get("ruling", "unknown")
 
         extra_blocks = (
