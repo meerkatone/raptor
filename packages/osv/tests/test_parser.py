@@ -130,8 +130,12 @@ def test_malformed_subobjects_are_skipped() -> None:
     assert len(rec.affected[0].ranges) == 1
     range_ = rec.affected[0].ranges[0]
     assert range_.type == "GIT"
-    # First event-dict had a non-string value, so it's an empty dict; second is OK.
-    assert range_.events == ({}, {"fixed": "abc123"})
+    # First event-dict had a non-string value, so it's an empty
+    # dict; second is OK. batch 560 sorts events by event-key
+    # rank (introduced < fixed/last_affected < limit < unknown);
+    # an empty dict has no key and is treated as "unknown",
+    # sorting AFTER `fixed`. Order is now (fixed, empty).
+    assert range_.events == ({"fixed": "abc123"}, {})
     assert len(rec.severity) == 1
     assert rec.severity[0].type == "CVSS_V31"
 

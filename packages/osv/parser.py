@@ -16,8 +16,11 @@ extraction useful even when the record is partially corrupt.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 from .types import (
     OsvAffected,
@@ -107,6 +110,19 @@ def _parse_ranges(ranges_raw: list[Any]) -> tuple[OsvRange, ...]:
             events.append(
                 {k: str(v) for k, v in ev.items() if isinstance(v, str)}
             )
+        # Normalise event ordering: introduced before fixed/limit.
+        # OSV spec requires events to be sorted by version, but
+        # real feeds occasionally ship them in the order they
+        # were authored (a `fixed` event written before its
+        # `introduced` counterpart). The matcher assumes
+        # introduced precedes the upper bound; reordering here
+        # at parse time avoids matcher bugs downstream.
+        # Empty events list short-circuits.
+        if events:
+            _ORDER = {"introduced": 0, "fixed": 1, "last_affected": 1, "limit": 2}
+            events.sort(key=lambda ev: _ORDER.get(
+                next(iter(ev.keys()), ""), 99,
+            ))
         out.append(OsvRange(type=type_str, repo=repo, events=tuple(events)))
     return tuple(out)
 
@@ -132,4 +148,13 @@ def _parse_iso(value: Any) -> datetime | None:
             value.replace("Z", "+00:00"),
         ).astimezone(timezone.utc)
     except ValueError:
+        # Pre-fix this `except ValueError: return None` swallowed
+        # the parse failure silently. Real OSV feeds occasionally
+        # ship malformed timestamps (vendor mirrors with
+        # locale-formatted dates, copy-paste-glitched values
+        # like "2024-13-45T..."); operators triaging "why is
+        # the published date None?" had no log breadcrumb to
+        # correlate. Log at debug level so the failure surfaces
+        # in verbose runs without spamming normal output.
+        log.debug("osv: failed to parse ISO timestamp %r", value)
         return None
