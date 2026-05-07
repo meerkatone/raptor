@@ -93,6 +93,26 @@ def generate(data: dict[str, Any]) -> str:
     trace_id = data.get("id", "TRACE")
     name = _sanitize(data.get("name", trace_id))
     steps = data.get("steps", [])
+    # Cap step count. Pre-fix `steps` was used unbounded;
+    # legitimate large traces (deep call chains in
+    # generated code, recursive analyses) produced
+    # massive Mermaid diagrams that:
+    #   * Took 10+ seconds to render in browsers, blocking
+    #     the operator UI thread.
+    #   * Hit Mermaid's own internal node-count limits and
+    #     produced cryptic "diagram too complex" errors.
+    #   * Exceeded markdown-rendering tools' size budgets,
+    #     causing reports to silently truncate at the
+    #     wrong place.
+    # 200 steps is the largest size that renders cleanly in
+    # mainstream Mermaid setups. Cap with a clear annotation
+    # in the diagram so the operator knows WHY truncation
+    # happened.
+    _MAX_STEPS = 200
+    truncated_count = 0
+    if len(steps) > _MAX_STEPS:
+        truncated_count = len(steps) - _MAX_STEPS
+        steps = steps[:_MAX_STEPS]
     branches = data.get("branches", [])
     attacker_control = data.get("attacker_control") or {}
 
@@ -226,6 +246,15 @@ def generate(data: dict[str, Any]) -> str:
         lines.append(f"    class {sink_ids} sink")
     if sanitize_ids:
         lines.append(f"    class {sanitize_ids} sanitize")
+
+    if truncated_count > 0:
+        lines.append("")
+        lines.append(
+            f'    TRUNC["⚠ Diagram truncated: '
+            f'{truncated_count} additional steps not shown '
+            f'(cap {_MAX_STEPS})"]'
+        )
+        lines.append("    style TRUNC fill:#fef9c3,stroke:#a16207")
 
     return "\n".join(lines)
 
