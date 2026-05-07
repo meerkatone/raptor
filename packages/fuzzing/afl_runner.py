@@ -284,7 +284,27 @@ class AFLRunner:
             # to tolerate both: we lose a small amount of speed and the
             # guarantee that external cores are captured (AFL still writes its
             # own crash artefacts under crashes/).
-            afl_env = os.environ.copy()
+            # Use get_safe_env() as the base, NOT os.environ.copy().
+            # Pre-fix the AFL subprocess inherited the operator's
+            # FULL environment including any RAPTOR-internal vars
+            # (RAPTOR_*, ANTHROPIC_API_KEY, OPENAI_API_KEY,
+            # AWS_*, GH_TOKEN, etc.). AFL itself doesn't
+            # interpret most of those, but:
+            #   * The fuzzed binary inherits the same env. If the
+            #     target reads `getenv("AWS_*")` (boto SDK,
+            #     credentials chain) or shells out (passing env
+            #     to libc functions), the operator's
+            #     credentials reach attacker-controlled code in
+            #     the fuzz target.
+            #   * On crash, AFL writes the env to the crash
+            #     metadata in `crashes/`; reports / triage flows
+            #     that include those files leak credentials.
+            # `get_safe_env()` strips dangerous / sensitive
+            # variables (see core/config.py DANGEROUS_ENV_VARS,
+            # LLM_API_KEY_VARS) by default. AFL_* vars get
+            # added explicitly below.
+            from core.config import RaptorConfig
+            afl_env = RaptorConfig.get_safe_env()
             afl_env.setdefault("AFL_SKIP_CPUFREQ", "1")
             afl_env.setdefault("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES", "1")
 
