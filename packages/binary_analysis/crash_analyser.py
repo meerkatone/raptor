@@ -712,17 +712,35 @@ class CrashAnalyser:
                 elif "thread backtrace" in line.lower():
                     in_registers = False
 
-        # Extract stack trace (LLDB format)
+        # Extract stack trace (LLDB format).
+        # Frame lines start with `frame #0:`, `frame #1:`, etc.
+        # The `* thread #1, queue = ...` header line ALSO starts with
+        # `*`, so the pre-fix predicate
+        # `startswith("*") or startswith("frame #")` matched the
+        # header AND every frame line, polluting the backtrace
+        # capture with the header text. Restrict to actual frame
+        # markers via explicit grouping. Also: the stop predicate
+        # `"disassemble" in line.lower()` was nested inside `elif`
+        # so it only fired when the previous `if` (frame match) was
+        # False — which it always is for "disassemble" lines —
+        # functionally correct but clearer with explicit parens
+        # and a separate stop check.
         in_backtrace = False
         backtrace_lines = []
         for line in lines:
-            if "thread backtrace" in line.lower() or "* thread #" in line:
+            stripped = line.strip()
+            if ("thread backtrace" in line.lower()) or ("* thread #" in line):
                 in_backtrace = True
-            if in_backtrace:
-                if line.strip().startswith("*") or line.strip().startswith("frame #"):
-                    backtrace_lines.append(line.strip())
-                elif "disassemble" in line.lower():
-                    break
+                continue  # the header itself is not a frame
+            if not in_backtrace:
+                continue
+            if "disassemble" in line.lower():
+                break
+            # Frame lines: `frame #N: ...` or `* frame #N` (current
+            # frame marker). Reject the bare `*` header that also
+            # starts with `*` but isn't a frame.
+            if stripped.startswith("frame #") or stripped.startswith("* frame #"):
+                backtrace_lines.append(stripped)
 
         context.stack_trace = "\n".join(backtrace_lines)
 
