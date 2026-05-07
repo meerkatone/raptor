@@ -36,15 +36,36 @@ fi
 # here would needlessly break the user's legitimate environment.
 for _var in \
     LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT \
+    LD_DEBUG LD_PROFILE LD_PROFILE_OUTPUT \
     GCONV_PATH \
     PYTHONSTARTUP PYTHONPATH PYTHONHOME PYTHONUSERBASE \
     PYTHONBREAKPOINT PYTHONINSPECT \
     OPENSSL_CONF SSLKEYLOGFILE \
     NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS \
+    MALLOC_CONF JE_MALLOC_CONF MALLOC_CHECK_ MALLOC_PERTURB_ \
     BASH_ENV ENV ; do
     unset "$_var"
 done
 unset _var
+# Added by batch 581:
+#   * LD_DEBUG / LD_PROFILE / LD_PROFILE_OUTPUT — glibc loader
+#     diagnostic env vars that write profile data to operator-
+#     readable paths, can be abused to enumerate libraries
+#     loaded by the launcher and to write to predictable
+#     filesystem locations during dynamic linking.
+#   * MALLOC_CONF / JE_MALLOC_CONF — jemalloc config; lets an
+#     attacker enable heap profiling, redirect profile writes
+#     to attacker-readable paths (e.g.
+#     `prof:true,prof_prefix:/tmp/x`), or trigger predictable
+#     allocator behaviour useful for exploit construction.
+#   * MALLOC_CHECK_ / MALLOC_PERTURB_ — glibc allocator
+#     diagnostics: high MALLOC_CHECK_ values print verbose
+#     allocator state to stderr (operator log capture leaks
+#     internal state); MALLOC_PERTURB_ stabilises
+#     uninitialised-memory disclosure ABI for an exploit.
+# All consistent with core/config.DANGEROUS_ENV_VARS (batch
+# 291). Stripping here protects the launcher → Python →
+# Claude Code chain at process boot.
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "raptor: python3 not found" >&2
