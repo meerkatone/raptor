@@ -179,13 +179,37 @@ class CrashAnalyser:
                             addr = parts[0]
                             sym_type = parts[1]
                             name = " ".join(parts[2:])
-                            
-                            # Only keep function symbols (T/t for text section)
-                            if sym_type in ["T", "t"] and addr.startswith("0"):
-                                try:
-                                    symbols[int(addr, 16)] = name
-                                except ValueError:
-                                    pass
+
+                            # Only keep function symbols (T/t for text section).
+                            # The pre-fix `addr.startswith("0")` filter rejected
+                            # nothing useful — addresses on x86_64 always start
+                            # with `0` (left-padded hex output from nm). The
+                            # weaker filter let through:
+                            # * zero addresses (`0000000000000000`) for
+                            #   undefined / external function symbols that nm
+                            #   still types as `T` in some build modes;
+                            #   stored as key `0` in the symbol table, which
+                            #   then matched any later address-resolution
+                            #   query that fell back to `int(..., 16) == 0`
+                            # * non-hex strings that happen to start with `0`
+                            #   (paths with `0` prefix in some `nm -A` modes,
+                            #   though we don't pass -A here)
+                            #
+                            # Tighten: require the address to be a valid hex
+                            # string of >= 8 chars (real text addresses are
+                            # 16 chars on x86_64, 8 on i386 — accept either)
+                            # AND non-zero (zero is "no address known").
+                            if sym_type not in ("T", "t"):
+                                continue
+                            if len(addr) < 8 or not all(c in "0123456789abcdefABCDEF" for c in addr):
+                                continue
+                            try:
+                                addr_int = int(addr, 16)
+                            except ValueError:
+                                continue
+                            if addr_int == 0:
+                                continue
+                            symbols[addr_int] = name
                             
         except Exception as e:
             logger.debug(f"Failed to load symbol table with nm: {e}")
