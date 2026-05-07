@@ -109,7 +109,7 @@ def _find_sca_agent() -> Optional[Path]:
                     env_path,
                 )
             else:
-                if "from packages.sca import SCA_ALLOWED_HOSTS" in text:
+                if _looks_like_real_sca_agent(text, p):
                     return p
                 logger.warning(
                     "RAPTOR_SCA_AGENT=%s does not look like a raptor-sca "
@@ -125,12 +125,35 @@ def _find_sca_agent() -> Optional[Path]:
             # SCA_ALLOWED_HOSTS import to distinguish it from this file.
             try:
                 text = resolved.read_text(encoding="utf-8")
-                if "from packages.sca import SCA_ALLOWED_HOSTS" in text:
+                if _looks_like_real_sca_agent(text, resolved):
                     return resolved
             except OSError:
                 pass
 
     return None
+
+
+_THIS_BRIDGE_FILE = Path(__file__).resolve()
+
+
+def _looks_like_real_sca_agent(text: str, resolved_path: Path) -> bool:
+    """Discriminator for "is this the real raptor-sca agent script?".
+
+    The string-only check (`"from packages.sca import SCA_ALLOWED_HOSTS"
+    in text`) was insufficient because THIS file (the bridge) ALSO
+    imports `SCA_ALLOWED_HOSTS` inside `run_sca_subprocess`. If
+    `RAPTOR_SCA_AGENT` (or a search candidate) ever resolved back to
+    this bridge file (operator typo, symlink, or auto-discovery edge
+    case), the bridge would re-launch ITSELF as the agent — infinite
+    recursion or, more commonly, a confusing crash from the bridge
+    being asked to do agent work it doesn't know how to do.
+
+    Stronger discriminator: realpath inequality vs this file AND the
+    string check. Both must hold.
+    """
+    if resolved_path.resolve() == _THIS_BRIDGE_FILE:
+        return False
+    return "from packages.sca import SCA_ALLOWED_HOSTS" in text
 
 
 # ---------------------------------------------------------------------------
