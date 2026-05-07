@@ -163,11 +163,40 @@ def get_out_dir() -> Path:
     return Path(base).resolve() if base else Path("out").resolve()
 
 
+# Vendored / cache / build directories whose dependency manifests
+# describe TRANSITIVE deps already covered by the top-level
+# manifest, OR are vendored copies whose pin-shape doesn't reflect
+# the actual project's intent. Including them in SCA produces
+# noisy reports (the same `react@17.0.2` flagged 30x because every
+# transitive dep also depends on it) and breaks fix recommendations
+# (an "upgrade `lodash` to 4.17.21" suggestion against a
+# vendored-by-someone-else lodash isn't actionable).
+_VENDOR_DIR_NAMES = frozenset({
+    "node_modules", "vendor", ".venv", "venv", "__pycache__",
+    ".tox", "dist", "build", "target", ".gradle", ".mvn",
+    "site-packages", "bower_components", ".bundle", "Pods",
+    ".cache", ".idea", ".vscode",
+})
+
+
 def find_dependency_files(root: Path) -> List[Path]:
     candidates = []
     for pat in ['pom.xml', 'build.gradle', 'package.json',
                 'requirements.txt', 'pyproject.toml']:
         for p in root.rglob(pat):
+            # Skip if any path component is a vendor / cache dir.
+            # Pre-fix `rglob` walked into node_modules and friends,
+            # picking up every transitive dep's package.json,
+            # multiplying the SCA report by orders of magnitude
+            # (a typical npm project has 1000+ nested
+            # package.json files, each producing duplicate /
+            # not-actionable advisories).
+            try:
+                rel_parts = p.relative_to(root).parts
+            except ValueError:
+                rel_parts = p.parts
+            if any(part in _VENDOR_DIR_NAMES for part in rel_parts[:-1]):
+                continue
             candidates.append(p)
     return candidates
 
