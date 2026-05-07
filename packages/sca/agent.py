@@ -337,9 +337,26 @@ def parse_requirements(p, _seen=None):
         return deps
     _seen.add(real)
     try:
-        text = p.read_text()
+        # `encoding='utf-8-sig'` strips a leading BOM if present.
+        # Pre-fix `read_text()` (default utf-8) preserved the BOM
+        # as `﻿` at the start of the first logical line —
+        # the BOM is whitespace-class to .strip() but NOT stripped
+        # by it, so the first dep ended up as `'﻿requests==2.31.0'`
+        # which OSV lookups failed on. Common in Windows-edited
+        # requirements.txt and generated files from `pip-compile`
+        # in some toolchains. utf-8-sig handles "BOM if present,
+        # plain utf-8 otherwise" without breaking BOM-less files.
+        text = p.read_text(encoding="utf-8-sig")
     except OSError:
         return deps
+    except UnicodeDecodeError:
+        # Fallback: preserve old behaviour for non-utf8 files
+        # (defensive — pip itself rejects non-utf8 requirements
+        # since pip 22.2, but legacy files might exist).
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            return deps
 
     # Join continuations: trailing `\` on a stripped-of-trailing-
     # whitespace line means "next physical line is part of this
