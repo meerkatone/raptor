@@ -56,8 +56,32 @@ def validate_vector(vector: str) -> bool:
     environmental extensions (``/E:H``, ``/RL:O``, ``/CR:H`` …). Only
     the base segments contribute to the numeric score; the extensions
     are tolerated, not consumed.
+
+    Reject vectors with duplicate metric keys. Pre-fix
+    `parse_vector` built `metrics[key] = value` in a dict, so a
+    vector like
+    `CVSS:3.1/AV:N/AC:L/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H` (note
+    AC appears twice) silently took the SECOND occurrence's
+    value, scoring as if it were `AC:H` even though the
+    operator had recorded both. Real-world cause: hand-edited
+    CVE entries where someone updated the AC value but
+    forgot to remove the old segment, or LLM-generated
+    vectors with hallucinated repeats. Stricter validation
+    here surfaces the malformation before scoring.
     """
-    return bool(_VECTOR_RE.match(vector))
+    if not _VECTOR_RE.match(vector):
+        return False
+    # Duplicate-key check.
+    parts = vector.split("/")[1:]  # Skip "CVSS:3.1" prefix.
+    seen = set()
+    for part in parts:
+        if ":" not in part:
+            continue
+        key = part.split(":", 1)[0]
+        if key in seen:
+            return False
+        seen.add(key)
+    return True
 
 
 def parse_vector(vector: str) -> dict:
