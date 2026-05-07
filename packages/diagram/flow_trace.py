@@ -86,13 +86,38 @@ def generate(data: dict[str, Any]) -> str:
     lines.append("")
 
     node_ids: list[str] = ["TITLE"]
+    # Stable per-step ID map so subsequent _step_node_id calls
+    # (branch attachment, class-list assembly) reuse the SAME id
+    # this loop assigned. Pre-fix the later call sites used the
+    # default `fallback="?"`, so when two steps both lacked an
+    # explicit `step` field, BOTH got id "S?" — Mermaid collapsed
+    # them into one graphical node, losing the visual
+    # distinction between them. Keying by `id(step)` gives a
+    # process-stable handle that's unique per step object
+    # within this call's `steps` list.
+    step_id_map: dict[int, str] = {}
 
     for step in steps:
         nid = _step_node_id(step, len(node_ids))
+        # Disambiguate when the per-step `step` field is missing
+        # or duplicated across multiple steps. Suffix with the
+        # 1-based index ensures every step gets a unique node
+        # id even if `step` field collides.
+        if nid in node_ids:
+            nid = f"{nid}_{len(node_ids)}"
+        step_id_map[id(step)] = nid
         label = _step_label(step)
         open_ch, close_ch = _step_node_shape(step)
         lines.append(f'    {nid}{open_ch}"{label}"{close_ch}')
         node_ids.append(nid)
+
+    def _stable_id(step: dict[str, Any]) -> str:
+        """Return the id this loop assigned, falling back to
+        derivation for callers that pass a step dict not in
+        `steps` (defensive — shouldn't happen, but the fallback
+        keeps us correctness-equivalent to pre-fix in that
+        edge case)."""
+        return step_id_map.get(id(step), _step_node_id(step))
 
     # Main chain edges
     lines.append("")
@@ -126,7 +151,7 @@ def generate(data: dict[str, Any]) -> str:
                 call_site = step.get("call_site", "") or ""
                 defn = step.get("definition", "") or ""
                 if branch_point_raw and (branch_point_raw in call_site or branch_point_raw in defn):
-                    lines.append(f"    {_step_node_id(step)} -. \"branch\" .-> {bid}")
+                    lines.append(f"    {_stable_id(step)} -. \"branch\" .-> {bid}")
                     attached = True
                     break
 
@@ -150,7 +175,7 @@ def generate(data: dict[str, Any]) -> str:
                                 best_dist = dist
                                 best_step = step
                     if best_step is not None:
-                        lines.append(f"    {_step_node_id(best_step)} -. \"branch\" .-> {bid}")
+                        lines.append(f"    {_stable_id(best_step)} -. \"branch\" .-> {bid}")
                         attached = True
 
             # --- pass 3: attach to first real step ---
@@ -167,9 +192,9 @@ def generate(data: dict[str, Any]) -> str:
         lines.append("    style CTRL fill:#fef9c3,stroke:#ca8a04")
 
     # Style: entry=blue, sink=red, call=default
-    entry_ids = ",".join(_step_node_id(s) for s in steps if s.get("type") == "entry")
-    sink_ids = ",".join(_step_node_id(s) for s in steps if s.get("type") == "sink")
-    sanitize_ids = ",".join(_step_node_id(s) for s in steps if s.get("type") == "sanitize")
+    entry_ids = ",".join(_stable_id(s) for s in steps if s.get("type") == "entry")
+    sink_ids = ",".join(_stable_id(s) for s in steps if s.get("type") == "sink")
+    sanitize_ids = ",".join(_stable_id(s) for s in steps if s.get("type") == "sanitize")
 
     lines.append("")
     lines.append("    classDef entry fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f")
