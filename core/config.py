@@ -515,6 +515,22 @@ class RaptorConfig:
                     f"Set RAPTOR_OUT_DIR to a path under your home or a "
                     f"dedicated work directory."
                 )
+        # Validate the parent exists. `mkdir(parents=True)` would
+        # silently create a deep directory tree under what may be a
+        # typo (`RAPTOR_OUT_DIR=/home/raptr/out` — note the missing
+        # `o` in `raptor`), leaving orphaned directories scattered
+        # across the filesystem and potentially under another user's
+        # `$HOME`. Surface the typo to the operator early — better a
+        # clear error at config time than silent creation of a wrong-
+        # pathed output tree that shows up as "where did my run go?"
+        # an hour later.
+        if not resolved.exists() and not resolved.parent.exists():
+            raise ValueError(
+                f"RAPTOR_OUT_DIR={resolved!r} parent directory "
+                f"{str(resolved.parent)!r} does not exist. Refusing to "
+                f"create a deep tree under what may be a typo. Create "
+                f"the parent first or fix the path."
+            )
         return resolved
 
     @staticmethod
