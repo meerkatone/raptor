@@ -1181,11 +1181,19 @@ class CrashAnalyser:
         functions = []
         for line in stack_trace.split('\n'):
             # Match GDB format: #N  0xADDR in function_name
-            match = re.search(r'in\s+([^\s(]+)', line)
+            # Word-boundary `\bin\b` so we don't match
+            # substring-`in` inside other tokens — pre-fix
+            # `'in\s+'` matched `inside_function`, `into`, and
+            # any literal text in string output containing
+            # `"in foo"`. The matched group then became part
+            # of the stack hash, polluting the dedup signal.
+            match = re.search(r'\bin\s+([^\s(]+)', line)
             if match:
                 functions.append(match.group(1))
             # Also match LLDB format: frame #N: 0xADDR function_name
-            elif 'frame' in line.lower():
+            # Word-boundary `frame` so we don't match `framework`,
+            # `iframe`, `frames` substring matches.
+            elif re.search(r'\bframe\b', line, re.IGNORECASE):
                 parts = line.split()
                 if len(parts) >= 3:
                     # Take the part after the address
