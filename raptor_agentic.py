@@ -83,7 +83,18 @@ def run_command_streaming(cmd: list, description: str) -> tuple[int, str, str]:
             text=True,
             bufsize=1,  # Line buffered
             universal_newlines=True,
-            env=RaptorConfig.get_safe_env()
+            env=RaptorConfig.get_safe_env(),
+            # Detach from parent's process group so operator
+            # Ctrl-C in the parent doesn't propagate SIGINT
+            # to the child via the controlling terminal. The
+            # parent handles its own KeyboardInterrupt and
+            # decides what to do with the child (terminate
+            # gracefully, kill, or let finish). Pre-fix
+            # SIGINT reached the child too — race-condition
+            # cleanup where the child died mid-write before
+            # the parent's handler could log a meaningful
+            # message.
+            start_new_session=True,
         )
 
         stdout_lines = []
@@ -642,6 +653,7 @@ Examples:
         semgrep_proc = subprocess.Popen(
             semgrep_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=RaptorConfig.get_safe_env(),
+            start_new_session=True,  # See main-Popen comment.
         )
 
     if run_codeql:
@@ -667,6 +679,7 @@ Examples:
         codeql_proc = subprocess.Popen(
             codeql_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=RaptorConfig.get_safe_env(),
+            start_new_session=True,  # See main-Popen comment.
         )
 
     # ---- Collect Semgrep results ----
