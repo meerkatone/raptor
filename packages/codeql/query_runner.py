@@ -635,7 +635,17 @@ class QueryRunner:
                 for result in run.get("results", []):
                     summary["total_findings"] += 1
 
-                    level = result.get("level", "warning")
+                    # Coerce to str — SARIF spec says `level` is a
+                    # string enum, but malformed emitters
+                    # occasionally produce ints (numeric severity)
+                    # or None. Pre-fix `summary["by_severity"][level]`
+                    # used the value as a dict key, so a dict-typed
+                    # tag (some custom queries return rich objects)
+                    # raised TypeError. None merged into one bucket
+                    # with the literal string "None" — confusing
+                    # later report consumers. Coerce defensively.
+                    raw_level = result.get("level", "warning")
+                    level = str(raw_level) if raw_level is not None else "warning"
                     summary["by_severity"][level] = summary["by_severity"].get(level, 0) + 1
 
                     # Count by rule
