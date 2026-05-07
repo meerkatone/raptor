@@ -469,19 +469,32 @@ def run_codeql(repo_path: Path, out_dir: Path, languages):
     for lang in languages:
         db = out_dir / f"codeql-db-{lang}"
         sarif = out_dir / f"codeql_{lang}.sarif"
-        # Database
+        # Database. `--threads=0` lets codeql auto-detect a sane
+        # parallelism level (uses all available CPUs). Pre-fix
+        # codeql defaulted to single-threaded extraction on
+        # large repos — extraction time scaled linearly with
+        # repo size and exhausted the analyser's 1800s timeout
+        # on monorepos that should have completed in 5-10
+        # minutes with auto-parallelism.
         rc, so, se = run(
-            ["codeql", "database", "create", str(db), "--language", lang, "--source-root", str(repo_path)],
+            ["codeql", "database", "create", str(db),
+             "--language", lang, "--source-root", str(repo_path),
+             "--threads=0"],
             timeout=1800,
         )
         if rc != 0:
             continue
-        # Queries
+        # Queries — same `--threads=0` for parallel query
+        # execution. Quiet codeql query suites (cpp / java)
+        # have hundreds of queries; serial execution wastes
+        # 80%+ of CPU time on machines with multiple cores.
         query_dir = Path("codeql-queries") / lang
         if not query_dir.exists():
             continue
         rc, so, se = run(
-            ["codeql", "query", "run", str(query_dir), "--database", str(db), "--output", str(sarif)],
+            ["codeql", "query", "run", str(query_dir),
+             "--database", str(db), "--output", str(sarif),
+             "--threads=0"],
             timeout=1800,
         )
         if rc == 0 and sarif.exists():
