@@ -262,10 +262,29 @@ def _inject_harness(rule_text: str, rule_name: str) -> str:
     pos_match = re.search(r"position\s+(\w+)", rule_text)
     pos_var = pos_match.group(1)
 
-    first_rule = re.search(r"@(\w+)@", rule_text)
-    if not first_rule:
+    # Detect multi-rule .cocci files. Pre-fix the harness only
+    # bound to the FIRST `@rule_name@` block, so:
+    #   * If the position variable was declared in a LATER
+    #     rule, spatch raised "unbound metavariable" for the
+    #     harness reference.
+    #   * If multiple rules each declared their own position
+    #     vars, only the first one's matches were captured;
+    #     the rest silently produced no COCCIRESULT output.
+    # `re.findall(r"@(\w+)@", rule_text)` finds all named rule
+    # headers. Multi-rule (>1 distinct name) returns the rule
+    # text unchanged — spatch still runs (just without our
+    # JSON harness), and the caller logs that structured
+    # output was unavailable for this rule file. Better than
+    # silently emitting partial / wrong data.
+    rule_names = re.findall(r"@(\w+)@", rule_text)
+    if len(set(rule_names)) > 1:
+        # Multi-rule file — harness injection isn't safe.
+        # Caller handles the no-output case via spatch's
+        # raw stdout.
         return rule_text
-    rule_id = first_rule.group(1)
+    if not rule_names:
+        return rule_text
+    rule_id = rule_names[0]
 
     safe_name = _SAFE_NAME_RE.sub("_", rule_name)
 
