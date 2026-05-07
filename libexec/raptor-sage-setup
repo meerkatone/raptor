@@ -28,6 +28,30 @@
 
 set -euo pipefail
 
+# Global EXIT trap + tmp-file array. Pre-fix the script used
+# per-function `trap '...' RETURN` patterns to clean up tmp
+# files. The RETURN trap only fires on FUNCTION exit, NOT on:
+#   * Ctrl-C (SIGINT) mid-function.
+#   * SIGTERM from the operator's shell / job manager.
+#   * Crashes that propagate past the function's RETURN
+#     handler (set -e + a sub-command failure).
+# In each case the tmp file leaked into /tmp/, accumulating
+# over multiple aborted setup attempts. Operators noticed
+# `/tmp/tmp.XXXXX` files appearing after every Ctrl-C and
+# wondered which to delete.
+#
+# Maintain a `_RAPTOR_TMP_FILES` array; functions append the
+# tmp path to it. EXIT trap iterates the array and rm-fs each
+# entry, fires on EVERY exit path including signals.
+declare -a _RAPTOR_TMP_FILES=()
+_raptor_cleanup_tmps() {
+    local f
+    for f in "${_RAPTOR_TMP_FILES[@]:-}"; do
+        [ -n "$f" ] && rm -f "$f"
+    done
+}
+trap _raptor_cleanup_tmps EXIT
+
 # ─── trust-marker check (do not source; inline by design) ───
 if [ -z "${CLAUDECODE:-}" ] && [ -z "${_RAPTOR_TRUSTED:-}" ]; then
     echo "$0: internal dispatch script." >&2
@@ -102,7 +126,7 @@ merge_mcp_entry() {
         return
     fi
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp); _RAPTOR_TMP_FILES+=("$tmp")
     trap 'rm -f "$tmp"' RETURN
     jq -s '.[0] * .[1]' "$MCP" "$TEMPLATE" > "$tmp"
     mv "$tmp" "$MCP"
@@ -113,7 +137,7 @@ merge_mcp_entry() {
 remove_mcp_entry() {
     [ -f "$MCP" ] || return 0
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp); _RAPTOR_TMP_FILES+=("$tmp")
     trap 'rm -f "$tmp"' RETURN
     jq 'del(.mcpServers.sage)' "$MCP" > "$tmp"
     mv "$tmp" "$MCP"
@@ -188,7 +212,7 @@ enable_sage_env() {
     mkdir -p "$(dirname "$SETTINGS_LOCAL")"
     local fragment='{"env":{"SAGE_ENABLED":"true"}}'
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp); _RAPTOR_TMP_FILES+=("$tmp")
     trap 'rm -f "$tmp"; umask "$_saved_umask"' RETURN
     if [ ! -f "$SETTINGS_LOCAL" ]; then
         echo "$fragment" | jq . > "$SETTINGS_LOCAL"
@@ -209,7 +233,7 @@ enable_sage_env() {
 disable_sage_env() {
     [ -f "$SETTINGS_LOCAL" ] || return 0
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp); _RAPTOR_TMP_FILES+=("$tmp")
     trap 'rm -f "$tmp"' RETURN
     # Remove env.SAGE_ENABLED; if env becomes empty, drop env entirely.
     jq 'if has("env") then (.env |= del(.SAGE_ENABLED)
