@@ -68,10 +68,17 @@ logger = logging.getLogger(__name__)
 _SCA_AGENT_CANDIDATES = (
     # git worktree at ../raptor-sca
     Path(__file__).resolve().parents[2] / ".." / "raptor-sca" / "packages" / "sca" / "agent.py",  # noqa: E501
-    # same-repo feature branch (packages/sca/agent.py IS the agent)
-    # — when feat/sca merges to main, this file is replaced by the
-    #   full agent; until then, a marker file signals the real one.
-    Path(__file__).resolve().parents[2] / "packages" / "sca" / "_sca_agent_marker",
+    # Pre-fix this tuple included a `_sca_agent_marker` entry meant
+    # to signal the same-repo location of the real agent once
+    # `feat/sca` merged to main. The marker file was never actually
+    # created, and the discriminator at line ~122 requires
+    # `resolved.name == "agent.py"`, which a marker file (any
+    # name other than `agent.py`) cannot satisfy. The entry was
+    # dead code — it walked through `is_file()` only when the
+    # marker physically existed, then failed the name filter.
+    # Removed to make the search transparent: one canonical
+    # candidate (the worktree) plus the `RAPTOR_SCA_AGENT` env
+    # override.
 )
 
 
@@ -84,12 +91,38 @@ def _find_sca_agent() -> Optional[Path]:
     file (which is the raptor-side bridge).
     """
     # Explicit override — useful for CI or custom layouts.
+    # Run the same content check we apply to the auto-discovered
+    # candidates (the `from packages.sca import SCA_ALLOWED_HOSTS`
+    # import is a discriminator). Pre-fix the env-override path
+    # only checked `is_file()`, so an operator pointing
+    # RAPTOR_SCA_AGENT at the WRONG file (e.g. an old `agent.py`
+    # from a sibling project, this bridge file itself, or a
+    # placeholder script with the wrong shape) silently launched
+    # subprocess that didn't have the SCA-agent contract — leading
+    # to confusing "no SCA findings" / opaque crash output. The
+    # content check makes a wrong override fail loud at discovery
+    # time with a clear log line.
     env_path = os.environ.get("RAPTOR_SCA_AGENT")
     if env_path:
         p = Path(env_path).resolve()
-        if p.is_file():
-            return p
-        logger.warning("RAPTOR_SCA_AGENT=%s does not exist — ignoring", env_path)
+        if not p.is_file():
+            logger.warning("RAPTOR_SCA_AGENT=%s does not exist — ignoring", env_path)
+        else:
+            try:
+                text = p.read_text(encoding="utf-8")
+            except OSError:
+                logger.warning(
+                    "RAPTOR_SCA_AGENT=%s could not be read — ignoring",
+                    env_path,
+                )
+            else:
+                if _looks_like_real_sca_agent(text, p):
+                    return p
+                logger.warning(
+                    "RAPTOR_SCA_AGENT=%s does not look like a raptor-sca "
+                    "agent (missing SCA_ALLOWED_HOSTS import) — ignoring",
+                    env_path,
+                )
 
     for candidate in _SCA_AGENT_CANDIDATES:
         resolved = candidate.resolve()
@@ -99,12 +132,35 @@ def _find_sca_agent() -> Optional[Path]:
             # SCA_ALLOWED_HOSTS import to distinguish it from this file.
             try:
                 text = resolved.read_text(encoding="utf-8")
-                if "from packages.sca import SCA_ALLOWED_HOSTS" in text:
+                if _looks_like_real_sca_agent(text, resolved):
                     return resolved
             except OSError:
                 pass
 
     return None
+
+
+_THIS_BRIDGE_FILE = Path(__file__).resolve()
+
+
+def _looks_like_real_sca_agent(text: str, resolved_path: Path) -> bool:
+    """Discriminator for "is this the real raptor-sca agent script?".
+
+    The string-only check (`"from packages.sca import SCA_ALLOWED_HOSTS"
+    in text`) was insufficient because THIS file (the bridge) ALSO
+    imports `SCA_ALLOWED_HOSTS` inside `run_sca_subprocess`. If
+    `RAPTOR_SCA_AGENT` (or a search candidate) ever resolved back to
+    this bridge file (operator typo, symlink, or auto-discovery edge
+    case), the bridge would re-launch ITSELF as the agent — infinite
+    recursion or, more commonly, a confusing crash from the bridge
+    being asked to do agent work it doesn't know how to do.
+
+    Stronger discriminator: realpath inequality vs this file AND the
+    string check. Both must hold.
+    """
+    if resolved_path.resolve() == _THIS_BRIDGE_FILE:
+        return False
+    return "from packages.sca import SCA_ALLOWED_HOSTS" in text
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +175,7 @@ def run_sca_subprocess(
     sandbox_args: Sequence[str] = (),
     env: Optional[dict] = None,
     timeout: int = 600,
+    writable_paths: Optional[Sequence[Path]] = None,
 ) -> tuple:
     """Run the raptor-sca agent as a sandboxed subprocess.
 
@@ -126,6 +183,21 @@ def run_sca_subprocess(
     child's outbound HTTPS is funnelled through the in-process proxy
     with :data:`packages.sca.SCA_ALLOWED_HOSTS` as the hostname
     allowlist.  Landlock confines writes to ``output_dir``.
+
+    Args:
+        writable_paths: Additional directories the agent needs write
+            access to. Pre-fix the agent could ONLY write to
+            ``output_dir`` — but raptor-sca's resolver subprocesses
+            (pip-compile, `npm install --package-lock-only`,
+            `mvn dependency:resolve`) need to write into their own
+            scratch dirs (`~/.cache/pip`, `~/.npm`, `~/.m2`) and
+            many also need to populate a `.venv/` next to the target
+            manifest. Pre-fix the resolver hit Landlock EACCES on
+            those dirs and silently fell back to "no resolution"
+            (treating every dep as unconstrained / not-pinned),
+            producing inflated false-positive SCA reports. Pass the
+            cache dirs and per-resolver scratch dirs here so the
+            agent has the writable surface it actually needs.
 
     Returns ``(returncode, stdout, stderr)``.
     """
@@ -140,6 +212,13 @@ def run_sca_subprocess(
         *sandbox_args,
     ]
 
+    # `output` is the canonical-write location; additional writable
+    # paths are layered via the sandbox's `writable_paths` kwarg.
+    # Empty / None tuple is harmless to sandbox_run.
+    extra_writable = (
+        tuple(str(p) for p in writable_paths) if writable_paths else ()
+    )
+
     result = sandbox_run(
         cmd,
         use_egress_proxy=True,
@@ -147,6 +226,7 @@ def run_sca_subprocess(
         caller_label="sca-agent",
         target=str(target),
         output=str(output_dir),
+        writable_paths=extra_writable,
         # `env if env is not None else ...` — pre-fix `env or` was
         # truthy-tested, so an EXPLICIT `env={}` (caller's signal
         # "spawn with empty env") got replaced with the default

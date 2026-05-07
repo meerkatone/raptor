@@ -298,7 +298,19 @@ def main():
                 print(f"Project '{args.name}' not found.")
                 return
             if args.purge and not args.yes and p.output_path.exists():
-                size = sum(f.stat().st_size for f in p.output_path.rglob("*") if f.is_file())
+                # See `core/project/clean.py` for the os.walk +
+                # followlinks=False rationale; same symlink-loop /
+                # cross-tree-stat hazard applies here.
+                size = 0
+                for root, _dirs, files in os.walk(p.output_path, followlinks=False):
+                    for fname in files:
+                        fp = Path(root) / fname
+                        try:
+                            st = fp.stat()
+                        except OSError:
+                            continue
+                        if not fp.is_symlink():
+                            size += st.st_size
                 if size >= 1024 * 1024:
                     size_str = f"{size / 1024 / 1024:.1f}MB"
                 elif size >= 1024:

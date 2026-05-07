@@ -57,6 +57,23 @@ class PreflightResult:
     confidence_haircut: float = _NO_HIT_HAIRCUT
 
 
+# Catastrophic-backtracking shapes — nested unbounded quantifiers
+# like `(a+)+`, `(.*)*`, `(\w+)+`. Any of these against pathological
+# input causes wallclock to grow super-linearly. Reject at corpus
+# load time so a future maintainer adding a pattern doesn't
+# accidentally introduce a ReDoS vector through the framework's own
+# preflight scanner.
+_REDOS_SHAPES = (
+    re.compile(r'[+*]\)[+*]'),       # (...+)+ , (...*)* , (...+)* , (...*)+
+    re.compile(r'\)\?\)\?\)'),        # deeply nested optional groups
+    re.compile(r'\([^()]*\|[^()]*\)\+'),  # (a|aa)+ alternation overlap
+)
+
+
+def _looks_redos(pattern: str) -> bool:
+    return any(s.search(pattern) for s in _REDOS_SHAPES)
+
+
 def _load_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
     by_file: dict[str, tuple[re.Pattern[str], ...]] = {}
     if not _PATTERNS_DIR.exists():
@@ -69,6 +86,24 @@ def _load_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
         for raw in path.read_text(encoding="utf-8").splitlines():
             stripped = raw.strip()
             if not stripped or stripped.startswith("#"):
+                continue
+            # ReDoS lint at corpus-load time. The patterns are
+            # framework-shipped today (not attacker-controlled), but
+            # the corpus file format is "easy to add a new pattern,
+            # no review", so a future maintainer drafting a pattern
+            # like `(\w+)*[!]` could inadvertently introduce a
+            # super-linear matcher into a hot path. Drop the
+            # offender with a clear log line so the pattern author
+            # sees it on first run.
+            if _looks_redos(stripped):
+                # No `logger` import in this module — use stdlib
+                # logging at module scope to avoid the import.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "preflight: dropping pattern with catastrophic-"
+                    "backtracking shape (file=%s pattern=%r)",
+                    path.name, stripped[:80],
+                )
                 continue
             try:
                 compiled.append(re.compile(stripped, flags))

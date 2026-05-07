@@ -176,8 +176,32 @@ class RaptorConfig:
     ENV_JOB_ID = "RAPTOR_JOB_ID"
     ENV_LLM_CMD = "RAPTOR_LLM_CMD"
 
-    # LLM Provider Configuration
-    OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    # LLM Provider Configuration.
+    #
+    # OLLAMA_HOST reads the env var on every access so a runtime
+    # change (test setup that sets OLLAMA_HOST after importing a
+    # consumer; an operator sourcing a shell rc after RAPTOR is
+    # already imported) is picked up. Pre-fix it was evaluated once
+    # at class definition time:
+    #
+    #     OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    #
+    # Any later env-var change was silently ignored — consumers
+    # held the stale `http://localhost:11434` default even when
+    # OLLAMA_HOST was set immediately after. Tests that set the env
+    # then imported the consumer module saw the wrong value with no
+    # diagnostic.
+    #
+    # Implement as a descriptor so both `RaptorConfig.OLLAMA_HOST`
+    # (class access; the existing call pattern across `core/llm/`)
+    # and `RaptorConfig().OLLAMA_HOST` (instance access; rare but
+    # supported) re-read the env var on every access. `__get__` is
+    # invoked for both class and instance reads.
+    class _OllamaHostDescriptor:
+        def __get__(self, obj, objtype=None):
+            return os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+    OLLAMA_HOST = _OllamaHostDescriptor()
 
     # Proxy variables to strip for security
     PROXY_ENV_VARS = [
@@ -330,6 +354,24 @@ class RaptorConfig:
                                # $PYTHONUSERBASE/lib/pythonX.Y/site-packages/.
                                # .pth files beginning with "import " are
                                # exec'd by site.py before any user code runs.
+        "VIRTUAL_ENV",         # When set, Python's `site.py` and
+                               # various tools (semgrep, pip)
+                               # adjust import paths to prefer
+                               # `$VIRTUAL_ENV/lib/...` first.
+                               # Inheriting the parent's VIRTUAL_ENV
+                               # into a subprocess that targets a
+                               # DIFFERENT interpreter (system
+                               # python, vendored binary) makes the
+                               # subprocess silently load packages
+                               # from the wrong venv — wrong
+                               # versions, broken native deps, or
+                               # hostile site-packages content if
+                               # the venv was attacker-controlled.
+                               # `packages/static-analysis/scanner.py`
+                               # was already stripping it locally;
+                               # promote here so all callers get
+                               # the same guarantee from
+                               # `get_safe_env()`.
         "GIT_CONFIG_GLOBAL",   # Overrides ~/.gitconfig path. A malicious
                                # config provides aliases that map to `!sh`
                                # commands, core.editor that execs arbitrary
@@ -515,6 +557,22 @@ class RaptorConfig:
                     f"Set RAPTOR_OUT_DIR to a path under your home or a "
                     f"dedicated work directory."
                 )
+        # Validate the parent exists. `mkdir(parents=True)` would
+        # silently create a deep directory tree under what may be a
+        # typo (`RAPTOR_OUT_DIR=/home/raptr/out` — note the missing
+        # `o` in `raptor`), leaving orphaned directories scattered
+        # across the filesystem and potentially under another user's
+        # `$HOME`. Surface the typo to the operator early — better a
+        # clear error at config time than silent creation of a wrong-
+        # pathed output tree that shows up as "where did my run go?"
+        # an hour later.
+        if not resolved.exists() and not resolved.parent.exists():
+            raise ValueError(
+                f"RAPTOR_OUT_DIR={resolved!r} parent directory "
+                f"{str(resolved.parent)!r} does not exist. Refusing to "
+                f"create a deep tree under what may be a typo. Create "
+                f"the parent first or fix the path."
+            )
         return resolved
 
     @staticmethod
@@ -531,7 +589,7 @@ class RaptorConfig:
         return RaptorConfig.MCP_JOB_DIR / job_id
 
     @staticmethod
-    def get_safe_env() -> dict:
+    def get_safe_env(*, preserve_proxy: bool = False) -> dict:
         """Return a sanitised copy of os.environ for subprocess use.
 
         Two-stage filter:
@@ -542,8 +600,18 @@ class RaptorConfig:
              through unless we explicitly add them.
           2. Blocklist (DANGEROUS_ENV_VARS + PROXY_ENV_VARS) — overlay.
              Belt + braces against an accidentally-over-broad allowlist
-             prefix. Also still removes proxy vars (HTTP_PROXY etc.)
-             that we want gone regardless.
+             prefix. By default also strips proxy vars (HTTP_PROXY,
+             HTTPS_PROXY, NO_PROXY) — most subprocesses (codeql build,
+             fuzzing harness, gdb) shouldn't be making outbound HTTP
+             on the operator's behalf, and a proxy that was set for
+             interactive use can leak through.
+
+        ``preserve_proxy=True`` keeps the proxy vars in the returned
+        env. Use only for subprocesses that legitimately need to
+        proxy outbound HTTP — typically the egress wrapper, the
+        sandbox proxy itself, or LLM clients that need to honour
+        an operator's HTTPS_PROXY setting. The dangerous-env-var
+        strip still applies.
 
         Callers who need a specific extra var (JAVA_HOME for a Java tool,
         a custom CA bundle, etc.) should add it to the returned dict
@@ -559,7 +627,8 @@ class RaptorConfig:
                 env[name] = value
         # Belt + braces: strip anything dangerous that somehow made it
         # through (either allowlisted explicitly or matching a prefix).
-        env = strip_env_vars(env, RaptorConfig.PROXY_ENV_VARS)
+        if not preserve_proxy:
+            env = strip_env_vars(env, RaptorConfig.PROXY_ENV_VARS)
         env = strip_env_vars(env, RaptorConfig.DANGEROUS_ENV_VARS)
         env["PYTHONUNBUFFERED"] = "1"
         return env

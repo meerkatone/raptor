@@ -13,9 +13,32 @@ from .availability import z3
 
 
 def bv_to_int(raw: int, width: int, signed: bool) -> int:
-    """Reinterpret an ``as_long()`` result as two's-complement when ``signed``."""
-    if signed and width > 0 and raw >= (1 << (width - 1)):
-        return raw - (1 << width)
+    """Reinterpret an ``as_long()`` result as two's-complement when ``signed``.
+
+    `as_long()` always returns a non-negative integer in
+    ``[0, 2**width)`` for a well-formed BitVec value, but a few callers
+    pass values that drifted out of range — most often:
+
+    * `width <= 0` (a degenerate decl, e.g. from a `Const` rather than
+      a `BitVec`); fall through with `raw` unchanged.
+    * `raw` already < 0 (a previously-converted signed value being
+      passed through this function twice — happens when the caller
+      runs `bv_to_int(format_witness(...))` against a model of a
+      model). Returning silently with a different value than the
+      caller expects masks the bug; surface it as `ValueError`.
+    * `raw >= 1 << width` (caller passed a value larger than the
+      declared width — width/raw mismatch from a wrong decl size or
+      a hand-constructed test). Same: silent truncation hides the bug.
+    """
+    if width <= 0:
+        return raw
+    upper = 1 << width
+    if not 0 <= raw < upper:
+        raise ValueError(
+            f"bv_to_int: raw={raw} out of range [0, {upper}) for width={width}"
+        )
+    if signed and raw >= (1 << (width - 1)):
+        return raw - upper
     return raw
 
 

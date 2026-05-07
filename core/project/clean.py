@@ -1,5 +1,6 @@
 """Clean old runs from a project, keeping latest N per command type."""
 
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
@@ -27,10 +28,23 @@ def plan_clean(project, keep=1) -> Dict[str, Any]:
             stats["kept"].append(d.name)
 
         for d in to_delete:
-            size = sum(
-                f.stat().st_size for f in d.rglob("*")
-                if f.is_file() and not f.is_symlink()
-            )
+            # `Path.rglob` follows symlinks under Python <3.13 with no
+            # opt-out; a malicious or accidental symlink under the run
+            # dir (e.g. `out/run-X/incoming -> /var/log`) would walk
+            # into and stat-sum unrelated trees, double-counting bytes
+            # and (worse) reading from arbitrary file descriptors. Use
+            # os.walk(followlinks=False) so we stay inside the run dir
+            # tree on every supported Python version.
+            size = 0
+            for root, _dirs, files in os.walk(d, followlinks=False):
+                for fname in files:
+                    fp = Path(root) / fname
+                    try:
+                        st = fp.stat()
+                    except OSError:
+                        continue
+                    if not fp.is_symlink():
+                        size += st.st_size
             stats["freed_bytes"] += size
             type_freed += size
             stats["delete_dirs"].append(d)

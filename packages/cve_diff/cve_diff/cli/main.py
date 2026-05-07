@@ -57,10 +57,35 @@ def _echo_flow_md(output_dir: Path, cve_id: str, quiet: bool) -> None:
     flow_md_path = output_dir / f"{cve_id}.flow.md"
     if not flow_md_path.exists():
         return
+    # Cap before echoing to stdout. Pre-fix `read_text()` was
+    # unbounded — a malformed pipeline that wrote a huge flow.md
+    # (logging loop with no fan-in cap, runaway error capture,
+    # operator-induced infinite stage retries before the cap added
+    # in batch 600) flooded the terminal with megabytes of output
+    # and pinned the CLI on the typer.echo wallclock.
+    # Real flow.md files are <50 KB; cap at 1 MB to leave headroom
+    # for unusually verbose runs while refusing pathological output.
+    _FLOW_MD_DISPLAY_CAP = 1 * 1024 * 1024
     try:
-        body = flow_md_path.read_text()
+        st = flow_md_path.stat()
     except OSError:
         return
+    if st.st_size > _FLOW_MD_DISPLAY_CAP:
+        try:
+            with flow_md_path.open("r", encoding="utf-8") as fh:
+                body = fh.read(_FLOW_MD_DISPLAY_CAP)
+            body += (
+                f"\n\n[... truncated; flow.md is {st.st_size:,} bytes — "
+                f"display cap {_FLOW_MD_DISPLAY_CAP:,}. Read full file at "
+                f"{flow_md_path}]\n"
+            )
+        except OSError:
+            return
+    else:
+        try:
+            body = flow_md_path.read_text()
+        except OSError:
+            return
     typer.echo("")
     typer.echo(f"=== {cve_id} — pipeline trace ===")
     typer.echo("")

@@ -221,10 +221,11 @@ def run_single_semgrep(
         semgrep_bin=semgrep_cmd,
     )
 
-    # Create clean environment without venv contamination or dangerous vars
+    # Create clean environment without venv contamination or dangerous vars.
+    # `VIRTUAL_ENV` and `PYTHONPATH` are now stripped by
+    # `get_safe_env()` itself (DANGEROUS_ENV_VARS); the local
+    # strips were redundant.
     clean_env = RaptorConfig.get_safe_env()
-    clean_env.pop('VIRTUAL_ENV', None)
-    clean_env.pop('PYTHONPATH', None)
     # Remove venv from PATH
     if 'PATH' in clean_env:
         path_parts = clean_env['PATH'].split(':')
@@ -623,10 +624,24 @@ def cleanup_per_pack_artifacts(out_dir: Path) -> int:
 def main():
     ap = argparse.ArgumentParser(description="RAPTOR Automated Code Security Agent with parallel scanning")
     ap.add_argument("--repo", required=True, help="Path or Git URL")
-    ap.add_argument("--policy_version", default=RaptorConfig.DEFAULT_POLICY_VERSION)
+    # Argparse accepts BOTH the hyphenated (`--policy-version`,
+    # `--policy-groups`) and underscore (`--policy_version`,
+    # `--policy_groups`) forms. The hyphenated form is canonical
+    # — matches the rest of the CLI surface (`--no-sandbox`,
+    # `--audit-verbose`) and POSIX convention. Underscore form
+    # retained as alias because docs/scripts in the wild used
+    # the underscore variant before this PR; removing them
+    # would break operator workflows that hard-coded the old
+    # spelling.
     ap.add_argument(
-        "--policy_groups",
+        "--policy-version", "--policy_version",
+        default=RaptorConfig.DEFAULT_POLICY_VERSION,
+        dest="policy_version",
+    )
+    ap.add_argument(
+        "--policy-groups", "--policy_groups",
         default=RaptorConfig.DEFAULT_POLICY_GROUPS,
+        dest="policy_groups",
         help="Comma-separated list of rule group names (e.g. crypto,secrets,injection,auth,all)",
     )
     ap.add_argument("--codeql", action="store_true", help="Run CodeQL stage if available")

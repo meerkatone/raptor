@@ -79,11 +79,31 @@ def compute_summary(run_dir: Path) -> Optional[Dict[str, Any]]:
         # Functions analysed (LLM)
         functions_analysed = record.get("functions_analysed", [])
         if functions_analysed:
-            tool_info["functions_analysed"] = len(functions_analysed)
-            tool_info["functions_total"] = total_items
-            # Compute SLOC covered by analysed functions
-            analysed_sloc = 0
+            # Deduplicate before counting. A single tool can record
+            # the same (file, function) twice — most commonly when
+            # a multi-stage analyser (validate stages A/B/C/D each
+            # touch the same sink function) appends per-stage entries
+            # without checking; or when an enrichment pass re-records
+            # an already-analysed function. Pre-fix the
+            # `len(functions_analysed)` count and the line-range sum
+            # both double-counted: a function analysed twice was
+            # reported as `functions_analysed=2` and its line range
+            # was added twice to `sloc_analysed`, inflating coverage
+            # numbers for any tool that records repeats.
+            seen_keys = set()
+            deduped = []
             for fa in functions_analysed:
+                key = (fa.get("file", ""), fa.get("function", ""))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                deduped.append(fa)
+
+            tool_info["functions_analysed"] = len(deduped)
+            tool_info["functions_total"] = total_items
+            # Compute SLOC covered by analysed functions.
+            analysed_sloc = 0
+            for fa in deduped:
                 file_path = fa.get("file", "")
                 func_name = fa.get("function", "")
                 matched_path = _match_to_inventory(file_path, inventory_paths) or file_path

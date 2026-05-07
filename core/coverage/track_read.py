@@ -99,7 +99,15 @@ def main():
     if dot == -1 or file_path[dot:].lower() not in _SOURCE_EXTENSIONS:
         return
 
-    # Skip files outside the target directory (path-level check, not string prefix)
+    # Skip files outside the target directory (path-level check, not string prefix).
+    # Substitute `file_path` with the symlink-resolved real path so
+    # the manifest records the canonical inventory path. Pre-fix the
+    # original (possibly symlinked) `file_path` was written, so when
+    # an operator's editor opened `target/symlink_to_handler.py`, the
+    # manifest carried that symlink name — but the inventory was
+    # built from real files, so the downstream lookup against
+    # `symlink_to_handler.py` returned no match and the coverage
+    # mark was lost. Recording the realpath fixes the join.
     if target:
         try:
             # Resolve symlinks and check proper path containment
@@ -107,6 +115,7 @@ def main():
             resolved_target = os.path.realpath(target)
             if not resolved.startswith(resolved_target + os.sep) and resolved != resolved_target:
                 return
+            file_path = resolved
         except (OSError, ValueError):
             return
 

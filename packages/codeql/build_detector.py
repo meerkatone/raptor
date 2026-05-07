@@ -883,6 +883,37 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
         claude_bin = _shutil.which("claude")
         if not claude_bin:
             return None
+        # Path allowlist for the resolved claude binary. `which` walks
+        # PATH, which an untrusted target repo could influence —
+        # `direnv`-style `.envrc`, a `pyproject.toml` build hook, or
+        # a Makefile that calls into the build_detector flow can
+        # prepend a malicious dir to PATH. The resolved absolute
+        # path must come from a known install location so an injected
+        # `claude` shim in the target repo doesn't get executed under
+        # CC's allowlisted-tool model.
+        try:
+            real_claude = os.path.realpath(claude_bin)
+        except OSError:
+            return None
+        allowed_prefixes = (
+            "/usr/local/bin/",
+            "/usr/bin/",
+            "/opt/",
+            os.path.expanduser("~/.local/bin/"),
+            os.path.expanduser("~/.npm-global/bin/"),
+            "/snap/",
+            "/home/linuxbrew/.linuxbrew/bin/",
+            "/opt/homebrew/bin/",
+        )
+        if not any(real_claude.startswith(p) for p in allowed_prefixes):
+            logger.info(
+                "  Skipping CC flag inference — `claude` resolves to %r "
+                "which is outside the install-location allowlist. "
+                "If this is a legitimate location, add it to "
+                "_cc_suggest_flags' `allowed_prefixes`.",
+                real_claude,
+            )
+            return None
 
         failure_sample = "\n".join(
             f"- {f['file']}: {f['error']}" for f in failures[:15]

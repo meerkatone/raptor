@@ -117,7 +117,12 @@ class Rejection:
 # Anchored via .fullmatch() at the call site, so the patterns themselves
 # are intentionally unanchored — they accept the whole token or nothing.
 _HEX_LITERAL_RE = re.compile(r'0x[0-9a-f]+', re.IGNORECASE)
-_DEC_LITERAL_RE = re.compile(r'\d+')
+# Decimal literals may carry a leading `-` so source-form expressions
+# like ``x > -10`` or ``errno == -EAGAIN`` (when the C macro expands
+# to a literal) are parseable. Hex literals stay positive-only —
+# `-0xff` isn't real source-form input; bit-pattern literals are
+# always written as their unsigned representation.
+_DEC_LITERAL_RE = re.compile(r'-?\d+')
 
 
 def propagate(text: str, sub: Rejection) -> Rejection:
@@ -149,7 +154,11 @@ def parse_literal_value(tok: str, profile: BVProfile) -> Union[int, Rejection]:
     if is_hex:
         v = int(tok, 16)
     elif _DEC_LITERAL_RE.fullmatch(tok):
-        if len(tok) > 1 and tok[0] == "0":
+        # Leading-zero check applies only to the magnitude — `-01234`
+        # has the same C-octal ambiguity as `01234`. Skip the sign
+        # before checking.
+        magnitude = tok.lstrip("-")
+        if len(magnitude) > 1 and magnitude[0] == "0":
             return Rejection(
                 tok, RejectionKind.LITERAL_AMBIGUOUS,
                 "leading-zero decimal is ambiguous with C octal",
@@ -187,17 +196,23 @@ def parse_literal_value(tok: str, profile: BVProfile) -> Union[int, Rejection]:
     # decimal sign-discipline.
     if is_hex or not profile.signed:
         upper_exclusive = 1 << profile.width
+        lower_inclusive = 0  # hex + unsigned reject negatives
     else:
         upper_exclusive = 1 << (profile.width - 1)
-    if v >= upper_exclusive:
+        # Signed two's-complement range is asymmetric: ``int8`` covers
+        # ``-128..127`` (lower bound is ``-2^(width-1)``, upper is
+        # ``2^(width-1) - 1``). A decimal `-128` at int8 must be
+        # accepted; `-129` rejected.
+        lower_inclusive = -(1 << (profile.width - 1))
+    if v >= upper_exclusive or v < lower_inclusive:
         if is_hex:
             range_desc = f"{profile.width}-bit range"
         else:
-            range_desc = f"{profile.describe()} positive range"
+            range_desc = f"{profile.describe()} range"
         return Rejection(
             tok, RejectionKind.LITERAL_OUT_OF_RANGE,
-            f"value {v:#x} exceeds {range_desc} "
-            f"(max {upper_exclusive - 1:#x})",
+            f"value {v:#x} outside {range_desc} "
+            f"({lower_inclusive:#x}..{upper_exclusive - 1:#x})",
         )
     return v
 
