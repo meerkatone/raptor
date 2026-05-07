@@ -185,10 +185,27 @@ def check_llm() -> tuple[list, list]:
                         continue
                     seen.add(provider)
                     futures[pool.submit(_test_key, provider, api_key, m.get("api_base"))] = provider
-                for future in as_completed(futures, timeout=5):
+                # `as_completed(timeout=5)` is an AGGREGATE
+                # timeout — applies to the iterator, not to
+                # individual futures. Pre-fix: with 5 providers
+                # configured, timeout=5 covered ALL of them
+                # collectively, so a single slow provider
+                # (network-misconfigured Anthropic endpoint
+                # taking 5s to fail-DNS) consumed the whole
+                # budget and the remaining providers never had
+                # their results collected — they got marked
+                # False as if THEIR keys failed.
+                #
+                # Wrap each `future.result()` in its own
+                # per-task `timeout=5` so each provider gets a
+                # full 5-second budget independent of others.
+                # The outer as_completed's timeout still bounds
+                # total wall-clock at ~5×N seconds worst case
+                # (acceptable for startup banner).
+                for future in as_completed(futures):
                     provider = futures[future]
                     try:
-                        key_status[provider] = future.result()
+                        key_status[provider] = future.result(timeout=5)
                     except Exception:
                         key_status[provider] = False
 
