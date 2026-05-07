@@ -953,7 +953,25 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             if result.returncode != 0 or not result.stdout.strip():
                 return None
 
-            content = strip_json_fences(result.stdout.strip())
+            # Cap JSON parse input. Pre-fix `result.stdout` could be
+            # arbitrarily large (CC model hallucinates and emits MB
+            # of "JSON"; CC subprocess could be tricked into echoing
+            # a large file via Read+output); json.loads would gladly
+            # consume the entire blob, allocating proportional
+            # memory + serialising it through the parser. The
+            # genuine response shape — `{"includes": [...],
+            # "defines": [...]}` with maybe 50 entries each at
+            # <100 chars — comfortably fits in 100KB. Anything
+            # larger is hallucination or attack.
+            _CC_JSON_MAX_BYTES = 100 * 1024
+            stdout = result.stdout.strip()
+            if len(stdout) > _CC_JSON_MAX_BYTES:
+                logger.warning(
+                    "CC suggest-flags output exceeded %d bytes (%d) — rejecting",
+                    _CC_JSON_MAX_BYTES, len(stdout),
+                )
+                return None
+            content = strip_json_fences(stdout)
 
             import json
             try:
