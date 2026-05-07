@@ -6,6 +6,7 @@ Analyses crashes from fuzzing to extract exploitability information.
 This is so much of a WIP, it's not even funny. However, you can see what we are trying to do and how it could be useful. 
 """
 
+import re
 import subprocess
 from core.sandbox import run as _sandbox_run, run_trusted as _run_trusted
 # _run_trusted: read-only tools (file, readelf, nm, strings, etc.) — no namespace overhead.
@@ -1078,36 +1079,68 @@ class CrashAnalyser:
         return info
 
     def _detect_environmental_crash(self, context: CrashContext) -> Dict[str, str]:
-        """Detect if crash is environmental (debugger artifacts, etc.)."""
+        """Detect if crash is environmental (debugger artifacts, etc.).
+
+        All keyword checks here use word-boundary matching. Pre-fix
+        the substring `in` comparisons produced misclassifications
+        that flipped real exploitable crashes to "environmental":
+
+          * `"int3" in disassembly_lower` matched any text with
+            "int3" as substring (e.g. token names in symbolic
+            disassemblies).
+          * `"gdb" in stack_lower` matched `gdbus`,
+            `gdbm_open`, `legacy_gdb_wrapper`. The crash got
+            tagged "debugger_or_sanitizer_artifact" and was
+            silently dropped from triage when in fact it was
+            a real bug in the gdbus binding.
+          * `"asan" in stack_lower` matched any function with
+            "asan" as substring.
+
+        False-negatives (real crashes mis-classified as
+        environmental) are particularly bad because the
+        finding then never reaches the operator's review
+        queue.
+        """
         info = {"environmental_crash": "false", "reason": ""}
-        
+
         # Check for SIGTRAP which could be debugger breakpoint
         if context.signal == "05":  # SIGTRAP
             # Look for debugger-related patterns in disassembly
             if context.disassembly:
                 disassembly_lower = context.disassembly.lower()
-                if "int3" in disassembly_lower or "breakpoint" in disassembly_lower:
+                if (
+                    re.search(r"\bint3\b", disassembly_lower)
+                    or re.search(r"\bbreakpoint\b", disassembly_lower)
+                ):
                     info["environmental_crash"] = "true"
                     info["reason"] = "debugger_breakpoint"
-                elif "trap" in disassembly_lower and "invalid" in disassembly_lower:
+                elif re.search(r"\btrap\b", disassembly_lower) \
+                        and re.search(r"\binvalid\b", disassembly_lower):
                     info["environmental_crash"] = "true"
                     info["reason"] = "invalid_trap_instruction"
-                    
-        # Check for crashes in debugger/library code
+
+        # Check for crashes in debugger/library code — word-boundary
+        # so `gdb` doesn't false-match `gdbus`, `gdbm_open`.
         if context.stack_trace:
             stack_lower = context.stack_trace.lower()
-            if any(lib in stack_lower for lib in ["gdb", "lldb", "valgrind", "asan", "ubsan"]):
+            lib_re = re.compile(r"\b(gdb|lldb|valgrind|asan|ubsan)\b")
+            if lib_re.search(stack_lower):
                 info["environmental_crash"] = "true"
                 info["reason"] = "debugger_or_sanitizer_artifact"
 
         # Check for sanitizer crashes only (NOT library functions like malloc/strcpy)
         # NOTE: Crashes in malloc/free/strcpy/memcpy are often EXPLOITABLE (heap overflow, UAF, etc.)
-        # and should NOT be marked as environmental
-        if context.function_name and any(sanitizer in context.function_name.lower() for sanitizer in [
-            "__asan", "__ubsan", "__lsan", "__tsan", "__msan", "__hwasan"
-        ]):
-            info["environmental_crash"] = "true"
-            info["reason"] = "sanitizer_artifact"
+        # and should NOT be marked as environmental.
+        # `__asan_*` family of internal symbols all start with `__`
+        # so `startswith("__asan")` is the canonical check (no
+        # ambiguity with substring matches inside other identifiers).
+        if context.function_name:
+            fn = context.function_name.lower()
+            if any(fn.startswith(sanitizer) for sanitizer in [
+                "__asan", "__ubsan", "__lsan", "__tsan", "__msan", "__hwasan",
+            ]):
+                info["environmental_crash"] = "true"
+                info["reason"] = "sanitizer_artifact"
 
         return info
 
