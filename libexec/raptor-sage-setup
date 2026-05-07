@@ -159,7 +159,18 @@ wait_health() {
     printf "Waiting for SAGE health"
     # SAGE serves /health (no /v1 prefix) — see docker-compose.sage.yml
     # healthcheck and core/sage/client.py.
-    for _ in $(seq 1 60); do
+    # `for _ in {1..60}` instead of `seq 1 60`. Pre-fix `seq`
+    # is GNU coreutils — present on Linux distros by default
+    # but NOT POSIX-required and NOT installed by default on
+    # macOS, BusyBox-based containers (Alpine without
+    # coreutils), or minimal Docker base images. Operators
+    # running RAPTOR on Alpine / minimal images saw
+    # "raptor-sage-setup: line 162: seq: command not found"
+    # and the wait_health loop never executed, then immediately
+    # printed " — timeout.\n" and exited. Bash brace expansion
+    # works on every bash >= 3.0 (which is older than macOS's
+    # bundled bash) and needs no external tool.
+    for _ in {1..60}; do
         # Check both HTTP-200 AND a sentinel string in the
         # response body. Pre-fix any 200 response from /health
         # marked SAGE as "ready" — but several proxy-layer
