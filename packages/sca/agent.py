@@ -236,7 +236,17 @@ def parse_package_json(p):
 def main():
     ap = argparse.ArgumentParser(description='RAPTOR SCA Agent')
     ap.add_argument('--repo', required=True)
-    args = ap.parse_args()
+    # `parse_known_args` so callers (raptor.py orchestrator,
+    # `/agentic --sca`, future wrappers) can pass `--out`,
+    # `--project`, `--max-cost`, etc. without crashing this
+    # subcommand. Pre-fix `parse_args()` raised SystemExit on
+    # any unknown arg, breaking the wrapping orchestrator that
+    # passes through standard RAPTOR run-lifecycle flags. The
+    # extras are silently dropped here — they're either
+    # consumed by the wrapper (--out, --project) before this
+    # subcommand sees argv, or genuinely irrelevant to SCA
+    # (`--no-exploits`).
+    args, _unknown = ap.parse_known_args()
     repo = Path(args.repo).resolve()
     if not repo.exists():
         raise SystemExit('repo not found')
