@@ -206,12 +206,25 @@ class WebCrawler:
             soup = BeautifulSoup(response.content, "html.parser")
 
             # Discover links
+            base_netloc = urlparse(self.client.base_url).netloc
             for link in soup.find_all("a", href=True):
                 href = link["href"]
                 absolute_url = urljoin(url, href)
 
-                # Only follow links on same domain
-                if urlparse(absolute_url).netloc == urlparse(url).netloc:
+                # Scope-check against `base_url`, not the
+                # currently-being-crawled URL. Pre-fix
+                # `urlparse(url).netloc` was the comparison —
+                # which means once a crawl drifted onto a
+                # different host (via an off-target link or a
+                # redirect we followed), every subsequent link
+                # FROM that off-target page was considered
+                # in-scope (matching the off-target's own netloc).
+                # The crawler then progressively wandered away
+                # from the operator-configured target. Anchor
+                # the scope check to base_url instead so drift
+                # is bounded to immediate neighbours rather than
+                # transitive expansion.
+                if urlparse(absolute_url).netloc == base_netloc:
                     self.discovered_urls.add(absolute_url)
 
                     # Extract parameters from URL
