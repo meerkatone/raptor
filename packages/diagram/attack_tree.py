@@ -177,12 +177,32 @@ def generate(
     hypotheses: list[dict] | None = None,
 ) -> str:
     root_id = _sid(data.get("root", "ROOT"))
-    nodes: list[dict] = data.get("nodes", [])
+    raw_nodes: list[dict] = data.get("nodes", [])
 
-    if not nodes:
+    if not raw_nodes:
         return 'flowchart TD\n    EMPTY["No attack tree nodes"]'
 
-    # Sanitize all node IDs upfront to prevent Mermaid markup injection
+    # Sanitize all node IDs upfront to prevent Mermaid markup injection.
+    # Pre-fix this mutated `raw_nodes[i]["id"]` in-place — the caller's
+    # `data` dict had its node IDs rewritten as a side effect of
+    # rendering. Symptoms:
+    #
+    # * A re-render of the same `data` dict (e.g. once for the
+    #   diagrams.md file, once via the JSON output back to the
+    #   knowledge graph) saw the already-sanitized IDs as inputs and
+    #   sanitized them again — `_sid` is idempotent so the IDs were
+    #   stable, but any caller relying on the original ID values lost
+    #   them on first render.
+    # * Tests that built `data` once and asserted on it afterwards
+    #   saw mutated IDs.
+    # * Two consumers reading the same `data` (knowledge graph + this
+    #   renderer) raced — whichever ran first decided the final ID
+    #   form.
+    #
+    # Shallow-copy each node before assigning the sanitized id, so
+    # the caller's dict is untouched. The new list still references
+    # the same shape information, just with id rewritten on a copy.
+    nodes = [dict(n) for n in raw_nodes]
     for n in nodes:
         n["id"] = _sid(n.get("id", "?"))
     node_map = {n["id"]: n for n in nodes}
