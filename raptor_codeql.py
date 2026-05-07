@@ -71,10 +71,24 @@ def run_autonomous_workflow(args):
     logger.info("RAPTOR CODEQL - AUTONOMOUS SECURITY ANALYSIS")
     logger.info(f"{'=' * 70}")
 
-    # Parse languages
+    # Parse languages — filter out empty entries from leading /
+    # trailing / consecutive commas. Pre-fix `--languages
+    # ",python,"` produced `["", "python", ""]`; the empty
+    # strings then propagated to codeql command lines as
+    # `--language ""` which codeql rejected with an
+    # unhelpful "language not recognised" error. Reject the
+    # whole arg-set with a clear error if filtering leaves
+    # an empty list (operator clearly intended to specify
+    # languages but mistyped).
     languages = None
     if args.languages:
-        languages = [lang.strip() for lang in args.languages.split(",")]
+        languages = [lang.strip() for lang in args.languages.split(",") if lang.strip()]
+        if not languages:
+            logger.error(
+                "--languages was supplied but contains no non-empty entries: %r",
+                args.languages,
+            )
+            sys.exit(1)
 
     # Parse build commands
     build_commands = None
