@@ -85,8 +85,21 @@ class CorpusGenerator:
                     "ini": [".ini", "[section]", "key=value"],
                 }
 
+                # Compute the joined-strings blob ONCE. Pre-fix
+                # `' '.join(self.binary_strings)` was called inside
+                # every condition check below — for typical real
+                # binaries `binary_strings` has 10K+ entries,
+                # making each join an O(M) operation where M is
+                # total string size (~MB on big binaries). With
+                # ~30 condition checks across the four loops
+                # below, the redundant joins added 30× O(M)
+                # work per analysis. On a real fuzz target
+                # (curl, bash) this took 5+ seconds doing
+                # nothing but rebuilding the same string.
+                strings_blob = ' '.join(self.binary_strings)
+
                 for format_name, indicators in format_indicators.items():
-                    if any(ind in ' '.join(self.binary_strings) for ind in indicators):
+                    if any(ind in strings_blob for ind in indicators):
                         analysis["formats_detected"].append(format_name)
                         self.detected_formats.add(format_name)
                         logger.info(f"Detected format: {format_name}")
@@ -94,13 +107,13 @@ class CorpusGenerator:
                 # Detect file extensions
                 extensions = [".txt", ".xml", ".json", ".conf", ".cfg", ".dat", ".bin"]
                 for ext in extensions:
-                    if ext in ' '.join(self.binary_strings):
+                    if ext in strings_blob:
                         analysis["file_extensions"].append(ext)
 
                 # Detect keywords that suggest input processing
                 keywords = ["parse", "read", "load", "process", "decode", "input", "file"]
                 for keyword in keywords:
-                    if keyword in ' '.join(self.binary_strings):
+                    if keyword in strings_blob:
                         analysis["keywords_found"].append(keyword)
 
                 # Detect command-based input format (e.g., "STACK:", "HEAP:")
@@ -116,7 +129,7 @@ class CorpusGenerator:
                 }
 
                 for cmd, patterns in command_patterns.items():
-                    if any(pat in ' '.join(self.binary_strings) for pat in patterns):
+                    if any(pat in strings_blob for pat in patterns):
                         self.detected_commands[cmd] = f"command_{cmd.lower()}"
                         logger.info(f"Detected command: {cmd}")
 
