@@ -136,9 +136,24 @@ wait_health() {
     # SAGE serves /health (no /v1 prefix) — see docker-compose.sage.yml
     # healthcheck and core/sage/client.py.
     for _ in $(seq 1 60); do
-        if curl -sf "$SAGE_URL/health" >/dev/null 2>&1; then
-            printf " — ready.\n"
-            return 0
+        # Check both HTTP-200 AND a sentinel string in the
+        # response body. Pre-fix any 200 response from /health
+        # marked SAGE as "ready" — but several proxy-layer
+        # misconfigurations (nginx default-site, Cloudflare
+        # 200-OK-with-error-page, k8s ingress controller's
+        # default backend) can return 200 with completely
+        # unrelated content. The launcher then proceeded
+        # assuming SAGE was up; the first real /v1/* call
+        # then failed in confusing ways (404 from the wrong
+        # backend, JSON parse error on HTML response).
+        # SAGE's /health endpoint returns a JSON `{"status":
+        # "ok", ...}` body; confirm the "ok" sentinel is
+        # present before trusting the response.
+        if response=$(curl -sf "$SAGE_URL/health" 2>/dev/null); then
+            if printf '%s' "$response" | grep -q '"ok"'; then
+                printf " — ready.\n"
+                return 0
+            fi
         fi
         sleep 2
         printf "."
