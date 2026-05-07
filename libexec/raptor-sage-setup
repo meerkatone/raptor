@@ -245,11 +245,22 @@ install_sage() {
 uninstall_sage() {
     need jq
     need docker
-    docker compose -f "$COMPOSE_FILE" down
+    # `--remove-orphans` so containers from PREVIOUS compose
+    # configs (e.g. operator updated docker-compose.sage.yml
+    # between runs and the old config's containers are still
+    # running) get cleaned up too. Pre-fix `docker compose
+    # down` only removes containers defined in the CURRENT
+    # compose file; stale containers from a prior config
+    # (renamed services, removed dependencies) lingered as
+    # zombies, holding port bindings and confusing the next
+    # `install` invocation with "port already allocated"
+    # errors. The orphan flag is safe — we WANT teardown to
+    # be thorough.
+    docker compose -f "$COMPOSE_FILE" down --remove-orphans
     remove_mcp_entry
     disable_sage_env
     echo "SAGE sidecar stopped. Data volumes preserved."
-    echo "To wipe volumes: docker compose -f $COMPOSE_FILE down -v"
+    echo "To wipe volumes: docker compose -f $COMPOSE_FILE down -v --remove-orphans"
 }
 
 case "$MODE" in
