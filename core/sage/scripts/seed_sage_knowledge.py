@@ -245,11 +245,35 @@ def extract_semgrep_config() -> list[dict]:
 
 
 def _chunk_text(text: str, max_chars: int = 1500) -> list[str]:
-    """Split text into chunks at paragraph or section boundaries."""
+    """Split text into chunks at paragraph or section boundaries.
+
+    Hard-splits any single line longer than ``max_chars``. Pre-fix the
+    line-by-line path appended `current = line` whenever the current
+    chunk would exceed `max_chars` — but if `line` itself was longer
+    than `max_chars` (e.g. a wrapped log entry, a long URL, a
+    minified JSON paste), the function emitted that single
+    over-budget line as its own "chunk" without any further split,
+    silently sending an oversized payload to SAGE that the embed
+    layer then rejected with an opaque token-limit error.
+    """
     chunks = []
     current = ""
 
+    def _hard_split(line: str) -> list[str]:
+        # Greedy fixed-width split on `max_chars` boundaries.
+        return [line[i:i + max_chars] for i in range(0, len(line), max_chars)] or [""]
+
     for line in text.split("\n"):
+        # Hard-split any line that, on its own, exceeds the budget.
+        # The flush of `current` happens first so we don't merge an
+        # oversized line into the previous paragraph's chunk.
+        if len(line) > max_chars:
+            if current.strip():
+                chunks.append(current.strip())
+                current = ""
+            for piece in _hard_split(line):
+                chunks.append(piece)
+            continue
         if len(current) + len(line) + 1 > max_chars and current:
             chunks.append(current.strip())
             current = line
