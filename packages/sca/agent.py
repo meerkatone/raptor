@@ -68,10 +68,17 @@ logger = logging.getLogger(__name__)
 _SCA_AGENT_CANDIDATES = (
     # git worktree at ../raptor-sca
     Path(__file__).resolve().parents[2] / ".." / "raptor-sca" / "packages" / "sca" / "agent.py",  # noqa: E501
-    # same-repo feature branch (packages/sca/agent.py IS the agent)
-    # — when feat/sca merges to main, this file is replaced by the
-    #   full agent; until then, a marker file signals the real one.
-    Path(__file__).resolve().parents[2] / "packages" / "sca" / "_sca_agent_marker",
+    # Pre-fix this tuple included a `_sca_agent_marker` entry meant
+    # to signal the same-repo location of the real agent once
+    # `feat/sca` merged to main. The marker file was never actually
+    # created, and the discriminator at line ~122 requires
+    # `resolved.name == "agent.py"`, which a marker file (any
+    # name other than `agent.py`) cannot satisfy. The entry was
+    # dead code — it walked through `is_file()` only when the
+    # marker physically existed, then failed the name filter.
+    # Removed to make the search transparent: one canonical
+    # candidate (the worktree) plus the `RAPTOR_SCA_AGENT` env
+    # override.
 )
 
 
