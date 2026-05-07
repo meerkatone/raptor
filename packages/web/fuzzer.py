@@ -49,7 +49,8 @@ class WebFuzzer:
         logger.info("Intelligent web fuzzer initialized (LLM-powered)")
 
     def fuzz_parameter(self, url: str, param_name: str, param_type: str = "text",
-                      vulnerability_types: Optional[List[str]] = None) -> List[Dict]:
+                      vulnerability_types: Optional[List[str]] = None,
+                      method: str = "GET") -> List[Dict]:
         """
         Fuzz a specific parameter with LLM-generated payloads.
 
@@ -58,6 +59,11 @@ class WebFuzzer:
             param_name: Parameter name
             param_type: Parameter type (text, number, email, etc.)
             vulnerability_types: Types to test (sqli, xss, etc.)
+            method: HTTP method ("GET" / "POST"). Default GET.
+                Pre-fix this method was hardcoded to GET; POST-only
+                endpoints were silently un-fuzzable. Crawler now
+                provides per-form `method` (already discovered)
+                and the scanner threads it through.
 
         Returns:
             List of findings
@@ -77,7 +83,7 @@ class WebFuzzer:
             payloads = self._generate_payloads(param_name, param_type, vuln_type)
 
             for payload in payloads:
-                finding = self._test_payload(url, param_name, payload, vuln_type)
+                finding = self._test_payload(url, param_name, payload, vuln_type, method)
                 if finding:
                     findings.append(finding)
                     self.findings.append(finding)
@@ -162,11 +168,28 @@ class WebFuzzer:
         return basic_payloads.get(vuln_type, ["test"])
 
     def _test_payload(self, url: str, param_name: str, payload: str,
-                     vuln_type: str) -> Optional[Dict]:
-        """Test a payload against endpoint."""
+                     vuln_type: str, method: str = "GET") -> Optional[Dict]:
+        """Test a payload against endpoint.
+
+        `method` selects HTTP verb. Pre-fix this hardcoded GET via
+        `self.client.get(url, params={...})`. POST-only endpoints
+        (login forms, mutation handlers, search backends that
+        reject GET with 405) were never reachable — fuzzer
+        reported zero findings on whole classes of forms even
+        when injection vulns were present in the POST body
+        handler.
+        """
         try:
-            # Send request with payload
-            response = self.client.get(url, params={param_name: payload})
+            # Send request with payload via the appropriate verb.
+            method_upper = method.upper()
+            if method_upper == "POST":
+                # Body-encoded params for POST; matches the
+                # default form encoding (application/x-www-form-urlencoded)
+                # that requests.post applies when `data=` is a dict.
+                response = self.client.post(url, data={param_name: payload})
+            else:
+                # Default + GET path: query-string params.
+                response = self.client.get(url, params={param_name: payload})
 
             # Analyze response using LLM
             is_vulnerable = self._analyze_response(response, payload, vuln_type)
