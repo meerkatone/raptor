@@ -146,7 +146,15 @@ def run_sca_subprocess(
         caller_label="sca-agent",
         target=str(target),
         output=str(output_dir),
-        env=env or RaptorConfig.get_safe_env(),
+        # `env if env is not None else ...` — pre-fix `env or` was
+        # truthy-tested, so an EXPLICIT `env={}` (caller's signal
+        # "spawn with empty env") got replaced with the default
+        # safe env because `{}` is falsy. The empty-env intent
+        # was silently overridden — sandbox children inherited
+        # the caller-default RAPTOR env when caller had
+        # specifically asked for nothing. Explicit None check
+        # preserves the caller's `{}` choice.
+        env=env if env is not None else RaptorConfig.get_safe_env(),
         capture_output=True,
         text=True,
         timeout=timeout,
