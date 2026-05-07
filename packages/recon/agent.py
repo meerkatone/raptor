@@ -19,29 +19,61 @@ def get_out_dir() -> Path:
     base = os.environ.get("RAPTOR_OUT_DIR")
     return Path(base).resolve() if base else Path("out").resolve()
 
+# Cap on inventory traversal — bounded so a target with
+# millions of files (or symlink loops we somehow descended
+# despite followlinks=False) can't exhaust the agent's
+# memory/time budget.
+_INVENTORY_FILE_CAP = 200_000
+
+
 def inventory(path: Path):
     counts = {}
     langs = {}
     total_files = 0
-    for p in path.rglob("*"):
-        if p.is_file():
+    truncated = False
+    # `os.walk(followlinks=False)` instead of `path.rglob("*")`:
+    #   * `rglob` follows symlinks by default on Python < 3.13.
+    #     A symlink loop in a target repo (vendored deps with
+    #     circular includes, intentionally-malicious target
+    #     planted by an attacker) hung the recon agent
+    #     indefinitely.
+    #   * `os.walk(followlinks=False)` short-circuits at the
+    #     symlink without entering its target.
+    # Hard cap at _INVENTORY_FILE_CAP enforces termination
+    # even on loop-free pathological trees.
+    import os
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for name in filenames:
             total_files += 1
+            if total_files > _INVENTORY_FILE_CAP:
+                truncated = True
+                break
+            p = Path(dirpath) / name
             ext = p.suffix.lower()
-            counts[ext] = counts.get(ext,0) + 1
+            counts[ext] = counts.get(ext, 0) + 1
             # coarse language mapping
-            if ext in ['.java','.kt']:
-                langs['java'] = langs.get('java',0)+1
+            if ext in ['.java', '.kt']:
+                langs['java'] = langs.get('java', 0) + 1
             elif ext in ['.py']:
-                langs['python'] = langs.get('python',0)+1
+                langs['python'] = langs.get('python', 0) + 1
             elif ext in ['.go']:
-                langs['go'] = langs.get('go',0)+1
-            elif ext in ['.js','.ts']:
-                langs['javascript'] = langs.get('javascript',0)+1
+                langs['go'] = langs.get('go', 0) + 1
+            elif ext in ['.js', '.ts']:
+                langs['javascript'] = langs.get('javascript', 0) + 1
             elif ext in ['.rb']:
-                langs['ruby'] = langs.get('ruby',0)+1
+                langs['ruby'] = langs.get('ruby', 0) + 1
             elif ext in ['.cs']:
-                langs['csharp'] = langs.get('csharp',0)+1
-    return {'file_count': total_files, 'ext_counts': counts, 'language_counts': langs}
+                langs['csharp'] = langs.get('csharp', 0) + 1
+        if truncated:
+            break
+    result = {
+        'file_count': total_files,
+        'ext_counts': counts,
+        'language_counts': langs,
+    }
+    if truncated:
+        result['truncated_at'] = _INVENTORY_FILE_CAP
+    return result
 
 def main():
     ap = argparse.ArgumentParser(description='RAPTOR Recon Agent - safe inventory')
