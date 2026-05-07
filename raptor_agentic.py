@@ -652,6 +652,7 @@ Examples:
         logger.info("Running: Scanning code with Semgrep")
         semgrep_proc = subprocess.Popen(
             semgrep_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            bufsize=1,  # Line-buffered, see main-Popen comment.
             env=RaptorConfig.get_safe_env(),
             start_new_session=True,  # See main-Popen comment.
         )
@@ -678,6 +679,7 @@ Examples:
         logger.info("Running: Scanning code with CodeQL")
         codeql_proc = subprocess.Popen(
             codeql_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            bufsize=1,  # Line-buffered, see main-Popen comment.
             env=RaptorConfig.get_safe_env(),
             start_new_session=True,  # See main-Popen comment.
         )
