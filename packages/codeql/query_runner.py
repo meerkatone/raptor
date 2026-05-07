@@ -27,7 +27,25 @@ logger = get_logger()
 
 import re
 
-_PACK_NOT_FOUND_RE = re.compile(r"[Qq]uery pack ([\w/.-]+)\S* cannot be found")
+# Tightened from `[\w/.-]+\S*` which accepted any path-like
+# blob (path-traversal `../../etc/passwd`, multi-segment
+# `a/b/c/d`, leading-dot `..foo`). Pack names follow CodeQL's
+# canonical `<scope>/<name>` format: each segment starts and
+# ends with alphanumeric, contains only alphanumeric + dash +
+# (for the `<name>` half) dot/underscore. The downloaded pack
+# name flows into a CLI-arg execve here (`codeql pack download
+# <pack>`); even though codeql validates internally, accepting
+# operator-controlled strings into ANOTHER subprocess invocation
+# is a surface we don't need.
+_PACK_NOT_FOUND_RE = re.compile(
+    r"[Qq]uery pack "
+    r"([a-zA-Z0-9](?:[a-zA-Z0-9_-]*[a-zA-Z0-9])?/"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9_.-]*[a-zA-Z0-9])?)"
+    # Optional version (`@1.2.3`) or suite-path (`:suite/x.qls`)
+    # suffix that codeql appends — discarded, not captured.
+    r"(?:[@:][^\s]*)?"
+    r" cannot be found"
+)
 
 
 def _extract_missing_pack(stderr: str) -> str | None:
