@@ -153,9 +153,21 @@ def findings_summary_line(counts: Dict[str, int], vuln_count: Optional[int] = No
         parts.append(f"{counts['error']} Error")
     if counts.get("other"):
         parts.append(f"{counts['other']} Uncategorised")
+    # Denominator clarity: when a `vuln_count` is passed AND it
+    # disagrees with `counts['total']`, the two numbers represent
+    # different things (`vuln_count` is the count of underlying
+    # vulnerability records before per-finding rendering;
+    # `counts['total']` is the count of findings actually scored).
+    # Pre-fix the line read `**X Confirmed** out of Y findings.`
+    # where Y was `vuln_count` — but the buckets in `parts` summed
+    # to `counts['total']`, not `vuln_count`. An operator doing
+    # arithmetic on the line ("X Confirmed + Z FP = Y findings?")
+    # got numbers that didn't add up. Disambiguate by labelling the
+    # mismatched-vuln_count case explicitly so the reader sees the
+    # ratio's denominator without needing to read the source.
     total = counts['total']
     if vuln_count is not None and vuln_count != total:
-        label = f"{vuln_count} findings"
+        label = f"{total} scored findings (from {vuln_count} vulnerability records)"
     else:
         label = f"{total} findings"
     if not parts:
