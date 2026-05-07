@@ -159,11 +159,22 @@ enable_sage_env() {
     # settings.local.json is per-machine (already covered by `.claude/*.local.json`
     # in .gitignore). cc_trust skips RAPTOR_DIR so the SAGE_* entry here is
     # safe from our own trust check.
+    #
+    # `umask 077` for the duration of this function. Pre-fix the
+    # generated settings.local.json + tmp files used the
+    # operator's default umask (commonly 022, world-readable).
+    # SAGE settings can grow to include endpoint URLs and (in
+    # future configurations) auth tokens; world-readable
+    # permissions on the file expose those to any local user
+    # on shared multi-user machines. 077 = owner-rwx only.
+    local _saved_umask
+    _saved_umask=$(umask)
+    umask 077
     mkdir -p "$(dirname "$SETTINGS_LOCAL")"
     local fragment='{"env":{"SAGE_ENABLED":"true"}}'
     local tmp
     tmp=$(mktemp)
-    trap 'rm -f "$tmp"' RETURN
+    trap 'rm -f "$tmp"; umask "$_saved_umask"' RETURN
     if [ ! -f "$SETTINGS_LOCAL" ]; then
         echo "$fragment" | jq . > "$SETTINGS_LOCAL"
         echo "Wrote SAGE_ENABLED=true to $SETTINGS_LOCAL."
@@ -172,7 +183,12 @@ enable_sage_env() {
         mv "$tmp" "$SETTINGS_LOCAL"
         echo "Merged SAGE_ENABLED=true into $SETTINGS_LOCAL."
     fi
+    # Belt-and-braces chmod in case mv preserved a wider mode
+    # from the tmp source (mv is atomic but inherits mode from
+    # source on cross-fs fallback).
+    chmod 600 "$SETTINGS_LOCAL"
     trap - RETURN
+    umask "$_saved_umask"
 }
 
 disable_sage_env() {
