@@ -301,7 +301,14 @@ Examples:
     from core.sandbox import add_cli_args, apply_cli_args
     add_cli_args(parser)
     args = parser.parse_args()
-    apply_cli_args(args, parser=parser)
+    # set_trust_override BEFORE apply_cli_args. apply_cli_args
+    # may invoke trust-checks downstream (e.g. when validating
+    # caller-supplied paths against project trust state). Pre-fix
+    # the trust override was set AFTER apply_cli_args, so any
+    # trust check fired during arg-application saw the default
+    # (untrusted) state and could refuse the operation despite
+    # the operator having explicitly passed --trust-repo. Move
+    # the override setup before apply_cli_args.
     if getattr(args, "trust_repo", False):
         # Umbrella flag: every target-repo trust check honours the same
         # operator-set override. New checks added here must keep this
@@ -310,6 +317,7 @@ Examples:
         from core.security.codeql_trust import set_trust_override as _ql_set
         _cc_set(True)
         _ql_set(True)
+    apply_cli_args(args, parser=parser)
 
     try:
         run_autonomous_workflow(args)
