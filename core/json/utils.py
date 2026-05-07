@@ -16,6 +16,26 @@ from typing import Any, Optional, Union
 logger = logging.getLogger(__name__)
 
 
+def _reject_non_finite(token: str) -> Any:
+    """`parse_constant` callback rejecting JSON5-ish ``NaN``/``Infinity``.
+
+    Stdlib `json` accepts the literal tokens ``NaN``, ``Infinity``, and
+    ``-Infinity`` by default — strictly an extension to RFC 8259, but
+    enabled out of the box. Once those land in a Python float, every
+    downstream `int(...)` / range check has to defend against
+    ``OverflowError`` and ``ValueError`` (``int(float('inf'))`` raises
+    ``OverflowError``; ``int(float('nan'))`` raises ``ValueError``;
+    comparisons against NaN are silently False), and forgetting that
+    branch leaks an unrelated exception type to a caller whose
+    ``except (OSError, ValueError)`` doesn't cover it.
+
+    Reject at parse time so corrupt or hostile config files surface
+    as a clean ``json.JSONDecodeError`` (the existing handler) rather
+    than as an arbitrary downstream crash.
+    """
+    raise ValueError(f"non-finite JSON constant rejected: {token}")
+
+
 def load_json(path: Union[str, Path], strict: bool = False) -> Optional[Any]:
     """Load a JSON file.
 
@@ -38,10 +58,16 @@ def load_json(path: Union[str, Path], strict: bool = False) -> Optional[Any]:
     if not p.exists():
         return None
     if strict:
-        return json.loads(p.read_text(encoding="utf-8-sig"))
+        return json.loads(
+            p.read_text(encoding="utf-8-sig"),
+            parse_constant=_reject_non_finite,
+        )
     try:
-        return json.loads(p.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError) as e:
+        return json.loads(
+            p.read_text(encoding="utf-8-sig"),
+            parse_constant=_reject_non_finite,
+        )
+    except (json.JSONDecodeError, ValueError, OSError) as e:
         # Pre-fix this returned None silently. Operators investigating
         # "why is my config not loading" had no signal — the file
         # existed, the function returned None, downstream code
@@ -112,8 +138,8 @@ def load_json_with_comments(path: Union[str, Path]) -> Optional[Any]:
         stripped = _strip_json_comments(text)
         if not stripped.strip():
             return None
-        return json.loads(stripped)
-    except (json.JSONDecodeError, OSError) as e:
+        return json.loads(stripped, parse_constant=_reject_non_finite)
+    except (json.JSONDecodeError, ValueError, OSError) as e:
         logger.warning("load_json_with_comments: failed to parse %s: %s", p, e)
         return None
 

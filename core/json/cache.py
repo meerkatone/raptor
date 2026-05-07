@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
+from .utils import _reject_non_finite
+
 logger = logging.getLogger(__name__)
 
 # Sentinel TTL meaning "never expire". Use for keys whose freshness
@@ -341,25 +343,28 @@ class JsonCache:
 
     @staticmethod
     def _read_envelope(path: Path) -> CacheEnvelope:
+        # `parse_constant` rejects ``NaN`` / ``Infinity`` / ``-Infinity``
+        # at parse time. Pre-fix `json.load` accepted them by default
+        # (a stdlib JSON5-ish extension), so a corrupt or hostile cache
+        # entry with `"ttl_seconds": Infinity` would parse cleanly,
+        # then blow up downstream with `OverflowError` from
+        # `int(float('inf'))` — an exception type try_get's
+        # `except (OSError, ValueError, KeyError)` does not cover, so
+        # the error leaked all the way out and crashed the consumer.
+        # Reject at parse time so the existing JSONDecodeError /
+        # ValueError handler treats it as a corrupt entry and the
+        # cache falls back to MISSING.
         with path.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
+            data = json.load(fh, parse_constant=_reject_non_finite)
         if not isinstance(data, dict):
             raise ValueError("cache entry is not an object")
-        # `int(float('inf'))` raises OverflowError; `int(float('nan'))`
-        # raises ValueError. `json.load` allows `Infinity` / `NaN`
-        # tokens by default (parse_constant keeps Python floats), so
-        # a malformed (or hostile) cache entry with a non-finite
-        # ttl_seconds blows up the read with an exception type the
-        # caller's `except (OSError, ValueError, KeyError)` doesn't
-        # cover — OverflowError leaks all the way out of try_get,
-        # crashing the consumer. Convert both to ValueError so the
-        # try_get's existing handler treats them as "corrupt entry"
-        # and returns MISSING.
+        # `ttl_seconds` may still be a non-numeric string from a
+        # truly malformed entry — keep the int-coerce guard for that.
         ttl_raw = data["ttl_seconds"]
         try:
             ttl = int(ttl_raw)
         except (OverflowError, ValueError, TypeError) as e:
-            raise ValueError(f"non-finite or non-numeric ttl_seconds: {ttl_raw!r}") from e
+            raise ValueError(f"non-numeric ttl_seconds: {ttl_raw!r}") from e
         return CacheEnvelope(
             written_at=float(data["written_at"]),
             ttl_seconds=ttl,
