@@ -49,7 +49,31 @@ class _RowContext:
 
     def __init__(self, row: dict[str, Any], table: str | None = None):
         self.row = row
-        self.payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+        # `.get("payload")` not `["payload"]`. Pre-fix
+        # `row["payload"]` raised KeyError on rows that didn't
+        # carry a payload field (rare but real — some
+        # SchemaEvolution event types in GH Archive have a
+        # null payload, and some BigQuery export shapes drop
+        # the key entirely on null-valued rows). The KeyError
+        # crashed the parser mid-row, aborting the whole
+        # batch ingest. Fall back to empty dict so downstream
+        # `.get` chains return None gracefully.
+        raw_payload = row.get("payload")
+        if raw_payload is None:
+            self.payload = {}
+        elif isinstance(raw_payload, str):
+            try:
+                self.payload = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                # Malformed JSON in the payload field — log
+                # nothing here (parser called per-row in tight
+                # loops; logging would be deafening on a
+                # batch with thousands of malformed rows).
+                # Empty dict matches the "missing payload"
+                # behaviour for downstream consumers.
+                self.payload = {}
+        else:
+            self.payload = raw_payload
         self.when = parse_datetime_lenient(row.get("created_at"))
         self.who = make_actor(row.get("actor_login", "unknown"), row.get("actor_id"))
 

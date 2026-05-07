@@ -9,8 +9,20 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
+# SHA captures: `{7,64}` to accept both SHA-1 (40 hex) and
+# SHA-256 (64 hex) git object names. Pre-fix `{7,40}` upper-
+# bound at 40 chars truncated SHA-256 hashes mid-string —
+# git repos that have migrated to SHA-256 (still rare in
+# 2026 but increasingly real) had their commit URLs
+# match-but-truncate, capturing only the first 40 of 64
+# chars. Subsequent SHA comparisons (cve_diff oracle, OSV
+# patch verify) then compared the truncated value against
+# full-length SHAs and reported "no match" for legitimate
+# patches. Trailing `\b` boundary so a URL with extra hex
+# characters appended (operator typo, copy-paste artefact)
+# doesn't have its SHA portion silently truncated either.
 GITHUB_COMMIT_URL_RE = re.compile(
-    r"https?://github\.com/([^/]+/[^/#?\s]+)/commit/([a-f0-9]{7,40})",
+    r"https?://github\.com/([^/]+/[^/#?\s]+)/commit/([a-f0-9]{7,64})\b",
     re.IGNORECASE,
 )
 
@@ -20,7 +32,7 @@ GITHUB_REPO_URL_RE = re.compile(
 )
 
 KERNEL_SHA_URL_RE = re.compile(
-    r"(?:kernel\.dance/|git\.kernel\.org/(?:linus|stable)/(?:c/)?)([a-f0-9]{7,40})",
+    r"(?:kernel\.dance/|git\.kernel\.org/(?:linus|stable)/(?:c/)?)([a-f0-9]{7,64})\b",
     re.IGNORECASE,
 )
 

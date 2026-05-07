@@ -21,6 +21,15 @@ SCA_ALLOWED_HOSTS: tuple[str, ...] = (
     "osv-vulnerabilities.storage.googleapis.com",   # OSV offline-DB zip mirror
     "www.cisa.gov",                                 # KEV feed
     "api.first.org",                                # EPSS scores
+    # NVD — pre-fix this was missing from the allowlist
+    # despite being a primary CVE-data source consumed by
+    # the SCA verification path (see packages/nvd/client.py).
+    # SCA runs that depended on NVD lookups (cve_diff oracle,
+    # NVD-only CVEs not in OSV) silently returned no data
+    # because the sandbox blocked the egress; operators saw
+    # empty NVD sections in reports without diagnostic
+    # explanation.
+    "services.nvd.nist.gov",
     # Registry metadata (harden / typosquat / supply-chain heuristics)
     "pypi.org",
     "registry.npmjs.org",
@@ -32,6 +41,10 @@ SCA_ALLOWED_HOSTS: tuple[str, ...] = (
     "api.nuget.org",
     "sources.debian.org",
     "formulae.brew.sh",
+    # GHSA — GitHub's security advisory feed; not the same
+    # data as OSV's GHSA mirror (slight latency + occasional
+    # advisories that GitHub publishes before OSV ingests).
+    "raw.githubusercontent.com",
     # Source-archive downloads (version-diff review + wheel-metadata fallback)
     "files.pythonhosted.org",                       # PyPI sdist/wheel archives
     "static.crates.io",                             # Cargo crate tarballs

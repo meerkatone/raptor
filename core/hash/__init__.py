@@ -54,7 +54,42 @@ def sha256_tree(
 
     h = hashlib.sha256()
     skipped = []
-    for p in sorted(root.rglob("*")):
+    # `os.walk(followlinks=False)` instead of `rglob` so we don't
+    # follow symlinks during tree enumeration. Pre-fix `rglob`
+    # follows symlinks by default on Python < 3.13. Three failure
+    # modes:
+    #   1. Symlink loop in the target tree → infinite enumeration,
+    #      hash never completes.
+    #   2. Symlink to a directory OUTSIDE root → that external
+    #      tree gets included in the hash, so two trees that
+    #      differ only in their out-of-tree symlink targets
+    #      produce different hashes (or the same hash when
+    #      content matches by coincidence). Cache validity is
+    #      then incorrect across machines / mount layouts.
+    #   3. Symlink to a sensitive file (`/etc/shadow` if
+    #      readable, /proc/self/environ) — the contents flow
+    #      into the hash AND into any error / debug message
+    #      that surfaces the file. Inadvertent secret-in-hash.
+    # os.walk + sorted yields the same canonical ordering as
+    # the original sorted(rglob); use a per-dir sorted listing
+    # so the resulting hash matches pre-fix for trees with no
+    # symlinks (back-compat).
+    import os as _os
+    all_files: list[Path] = []
+    for dirpath, dirnames, filenames in _os.walk(root, followlinks=False):
+        # Sort in-place so iteration order matches sorted(rglob).
+        dirnames.sort()
+        filenames.sort()
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                # Skip leaf symlinks too — same threat model.
+                continue
+            all_files.append(p)
+    # Final sort matches the original `sorted(root.rglob("*"))`
+    # contract for callers that expected a particular ordering.
+    all_files.sort()
+    for p in all_files:
         if not p.is_file():
             continue
         stat = p.stat()

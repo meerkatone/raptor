@@ -95,7 +95,23 @@ fi
 # -I = isolated mode: strips PYTHONPATH and PYTHONHOME, doesn't add user site,
 #      and does not prepend cwd to sys.path. Prevents the target repo from
 #      smuggling a shadowing `core/` via PYTHONPATH, ~/.local, or cwd.
-cd "$RAPTOR_DIR"
+# Pre-fix `cd "$RAPTOR_DIR"` failed silently if RAPTOR_DIR
+# became invalid (operator running from a deleted dir, race
+# with directory removal, broken symlink). Subsequent
+# `python3 -I - "$RAPTOR_DIR" ...` then ran from the OLD
+# cwd with RAPTOR_DIR pointing somewhere that the
+# `sys.path.insert(0, raptor_dir)` line couldn't actually
+# read from — the import inside the heredoc raised
+# ModuleNotFoundError, the script exited rc=1, and per
+# batch 586 we'd treat that as "failing closed" — correct
+# behaviour but with an unhelpful "undocumented exit code
+# 1" message. Catch the cd failure here with a clear
+# diagnostic instead.
+if ! cd "$RAPTOR_DIR" 2>/dev/null; then
+    echo "raptor-cc-trust-check: cannot cd into RAPTOR_DIR=$RAPTOR_DIR" >&2
+    echo "  (RAPTOR_DIR resolved at startup but is no longer accessible — refusing to run trust check)" >&2
+    exit 3
+fi
 set +e
 python3 -I - "$RAPTOR_DIR" "$TARGET" "$TRUST" <<'PY'
 import sys
@@ -120,4 +136,32 @@ if [ "$DRY_RUN" = "1" ] && [ "$rc" = "2" ]; then
     echo "raptor-cc-trust-check: --dry-run suppressed the block (would have exited 2)" >&2
     exit 0
 fi
+
+# Fail-closed on undocumented exit codes. The Python checker
+# documents three exit codes: 0 (clean), 2 (blocked), 3 (error
+# during scan). Any other code (1 from interpreter crash, 137
+# from OOM, 139 from segfault, 99 from a future-added code we
+# haven't taught the launcher about) is undefined behaviour
+# from the trust-check perspective.
+#
+# Pre-fix `exit "$rc"` propagated whatever the Python returned.
+# The launcher's downstream wrapper (bin/raptor) only treats
+# rc=2 as "blocked" and rc=0 as "clean"; everything else
+# silently fell through to the "proceed" path. So a corrupted
+# Python that crashed with rc=137 looked like rc=137 to the
+# launcher, which interpreted it as "unknown — proceed" — the
+# trust check effectively didn't run. SECURITY BUG: an
+# attacker who can OOM the trust-check process gets to bypass
+# the trust check entirely.
+#
+# Map any non-{0,2,3} code to rc=2 (blocked). Better to fail
+# noisy than silently-bypass the security gate.
+case "$rc" in
+    0|2|3)
+        ;;
+    *)
+        echo "raptor-cc-trust-check: undocumented exit code $rc — failing closed (treating as 'blocked')" >&2
+        rc=2
+        ;;
+esac
 exit "$rc"

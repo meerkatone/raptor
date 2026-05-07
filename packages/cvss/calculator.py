@@ -34,7 +34,18 @@ _SEVERITY = [
 ]
 
 _VECTOR_RE = re.compile(
-    r"^CVSS:3\.[01]/"
+    # `\A` / `\Z` anchors instead of `^` / `$`. Pre-fix `$` in
+    # Python regex matches end-of-string OR just before a
+    # trailing newline. So a vector like
+    # `"CVSS:3.1/AV:N/AC:L/.../A:H\nrm -rf"` PASSED
+    # validation — the `\n` after `A:H` matched `$`, and the
+    # rest of the string (which could be CLI-injected payload
+    # text or LLM-output trailing junk) was silently ignored
+    # by the regex. Downstream `parse_vector` then split on
+    # `/` and processed `A:H\nrm` as a metric (the colon match
+    # would still parse the key as `A` and value as `H\nrm`).
+    # Strict-end-of-string `\Z` rejects trailing newlines.
+    r"\ACVSS:3\.[01]/"
     r"AV:[NALP]/AC:[LH]/PR:[NLH]/UI:[NR]/S:[UC]/"
     r"C:[NLH]/I:[NLH]/A:[NLH]"
     # Optional temporal (E, RL, RC) and environmental
@@ -45,7 +56,7 @@ _VECTOR_RE = re.compile(
     # alphabetic and the value is a single token; we accept any such
     # suffix. ``compute_base_score`` ignores keys it doesn't recognise.
     r"(?:/[A-Za-z]+:[A-Za-z0-9]+)*"
-    r"$"
+    r"\Z"
 )
 
 

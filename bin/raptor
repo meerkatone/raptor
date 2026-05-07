@@ -36,15 +36,36 @@ fi
 # here would needlessly break the user's legitimate environment.
 for _var in \
     LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT \
+    LD_DEBUG LD_PROFILE LD_PROFILE_OUTPUT \
     GCONV_PATH \
     PYTHONSTARTUP PYTHONPATH PYTHONHOME PYTHONUSERBASE \
     PYTHONBREAKPOINT PYTHONINSPECT \
     OPENSSL_CONF SSLKEYLOGFILE \
     NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS \
+    MALLOC_CONF JE_MALLOC_CONF MALLOC_CHECK_ MALLOC_PERTURB_ \
     BASH_ENV ENV ; do
     unset "$_var"
 done
 unset _var
+# Added by batch 581:
+#   * LD_DEBUG / LD_PROFILE / LD_PROFILE_OUTPUT — glibc loader
+#     diagnostic env vars that write profile data to operator-
+#     readable paths, can be abused to enumerate libraries
+#     loaded by the launcher and to write to predictable
+#     filesystem locations during dynamic linking.
+#   * MALLOC_CONF / JE_MALLOC_CONF — jemalloc config; lets an
+#     attacker enable heap profiling, redirect profile writes
+#     to attacker-readable paths (e.g.
+#     `prof:true,prof_prefix:/tmp/x`), or trigger predictable
+#     allocator behaviour useful for exploit construction.
+#   * MALLOC_CHECK_ / MALLOC_PERTURB_ — glibc allocator
+#     diagnostics: high MALLOC_CHECK_ values print verbose
+#     allocator state to stderr (operator log capture leaks
+#     internal state); MALLOC_PERTURB_ stabilises
+#     uninitialised-memory disclosure ABI for an exploit.
+# All consistent with core/config.DANGEROUS_ENV_VARS (batch
+# 291). Stripping here protects the launcher → Python →
+# Claude Code chain at process boot.
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "raptor: python3 not found" >&2
@@ -109,8 +130,23 @@ if ! command -v claude >/dev/null 2>&1; then
     exit 1
 fi
 
-# Export static env vars
-export RAPTOR_CALLER_DIR="$(pwd)"
+# Export static env vars. RAPTOR_CALLER_DIR holds the
+# operator's PWD at launch time (used to resolve targets +
+# project paths in subcommands). Reject control bytes
+# (newlines, tabs, NULs, escape) so a pathologically-crafted
+# pwd value can't smuggle CLI-arg / line-injection payloads
+# downstream — a directory path SHOULD never contain
+# whitespace control chars on a healthy filesystem.
+_caller_dir="$(pwd)"
+case "$_caller_dir" in
+    *[$'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x1b']*)
+        echo "raptor: RAPTOR_CALLER_DIR contains control bytes — refusing" >&2
+        echo "  (\$PWD has chars in the C0 control range; this is suspicious — bailing safely)" >&2
+        exit 1
+        ;;
+esac
+export RAPTOR_CALLER_DIR="$_caller_dir"
+unset _caller_dir
 export RAPTOR_DIR
 # Trust marker — libexec/ scripts refuse to run without one of
 # CLAUDECODE, _RAPTOR_TRUSTED, or RAPTOR_DIR. We've stripped env above
@@ -160,10 +196,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Build initial prompt: /raptor [target]
-if [[ -n "$TARGET" && -n "$INITIAL_PROMPT" ]]; then
-    INITIAL_PROMPT="/raptor $TARGET"
+# Build initial prompt: /raptor [target]. Escape TARGET
+# before interpolating into the prompt string. Pre-fix `"/raptor
+# $TARGET"` interpolated `$TARGET` raw — for legitimate paths
+# this was harmless, but TARGET is operator-supplied:
+#   * Path with embedded newlines (`/foo$'\n'/extra`) split
+#     the prompt into multiple lines downstream — the second
+#     line was treated by Claude Code as a new instruction.
+#   * Path with embedded backticks / `$()` was preserved
+#     verbatim into the prompt (Claude Code receives a
+#     literal string, doesn't shell-eval), but if the
+#     operator copied the rendered prompt elsewhere
+#     (Slack message, ticket) and pasted into a shell, the
+#     command substitution would fire there.
+# Strip control bytes from TARGET before interpolation;
+# legitimate path components don't contain them.
+_target_clean=$(printf '%s' "$TARGET" | tr -d '\000-\010\013-\037')
+if [ "$_target_clean" != "$TARGET" ]; then
+    echo "raptor: TARGET contained control bytes — stripped before use" >&2
 fi
+if [[ -n "$_target_clean" && -n "$INITIAL_PROMPT" ]]; then
+    INITIAL_PROMPT="/raptor $_target_clean"
+fi
+unset _target_clean
 
 # Resolve which directory the trust check should scan
 CHECK_TARGET=""

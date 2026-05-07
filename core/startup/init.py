@@ -185,10 +185,27 @@ def check_llm() -> tuple[list, list]:
                         continue
                     seen.add(provider)
                     futures[pool.submit(_test_key, provider, api_key, m.get("api_base"))] = provider
-                for future in as_completed(futures, timeout=5):
+                # `as_completed(timeout=5)` is an AGGREGATE
+                # timeout — applies to the iterator, not to
+                # individual futures. Pre-fix: with 5 providers
+                # configured, timeout=5 covered ALL of them
+                # collectively, so a single slow provider
+                # (network-misconfigured Anthropic endpoint
+                # taking 5s to fail-DNS) consumed the whole
+                # budget and the remaining providers never had
+                # their results collected — they got marked
+                # False as if THEIR keys failed.
+                #
+                # Wrap each `future.result()` in its own
+                # per-task `timeout=5` so each provider gets a
+                # full 5-second budget independent of others.
+                # The outer as_completed's timeout still bounds
+                # total wall-clock at ~5×N seconds worst case
+                # (acceptable for startup banner).
+                for future in as_completed(futures):
                     provider = futures[future]
                     try:
-                        key_status[provider] = future.result()
+                        key_status[provider] = future.result(timeout=5)
                     except Exception:
                         key_status[provider] = False
 
@@ -482,9 +499,39 @@ def setup_env_file():
     try:
         existing = Path(env_file).read_text() if Path(env_file).exists() else ""
         additions = []
-        if bin_dir not in existing:
-            additions.append(f'export PATH="$PATH:{bin_dir}"')
-        if "RAPTOR_DIR" not in existing:
+        # Substring dedup is fragile. Pre-fix:
+        #   if bin_dir not in existing  → false positive when
+        #     existing contains a path with bin_dir as a
+        #     PREFIX (e.g. operator-set
+        #     `PATH="$PATH:/home/raptor/bin/oldraptor"`,
+        #     bin_dir is `/home/raptor/bin`, substring match
+        #     fires).
+        #   if "RAPTOR_DIR" not in existing → false positive
+        #     against `_RAPTOR_DIR_OLD`, `RAPTOR_DIR_OVERRIDE`,
+        #     `# RAPTOR_DIR comment` (substring matches
+        #     anywhere). The export then silently didn't
+        #     happen and downstream `os.environ["RAPTOR_DIR"]`
+        #     readers (per the project rule) crashed at first
+        #     import.
+        # Use line-level checks instead: only treat the export
+        # as already-present if it appears as the LHS of an
+        # `export VAR=` line (or `VAR=` without export).
+        existing_lines = existing.splitlines()
+        def _has_export(var: str) -> bool:
+            for ln in existing_lines:
+                stripped = ln.strip()
+                if stripped.startswith(f"export {var}=") or stripped.startswith(f"{var}="):
+                    return True
+            return False
+        if not _has_export("PATH") or bin_dir not in existing:
+            # PATH is special — the export line typically appends
+            # ($PATH:newdir), so we keep the substring check
+            # for bin_dir specifically (cluster row's
+            # narrower concern is RAPTOR_DIR substring match,
+            # not PATH).
+            if bin_dir not in existing:
+                additions.append(f'export PATH="$PATH:{bin_dir}"')
+        if not _has_export("RAPTOR_DIR"):
             additions.append(f'export RAPTOR_DIR="{repo_root}"')
         if additions:
             with open(env_file, "a") as f:

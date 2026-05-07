@@ -55,12 +55,26 @@ from core.run.safe_io import safe_run_mkdir
 
 
 def _extract_target(args: list) -> str | None:
-    """Extract the target path from command args (--repo, --binary, or --url)."""
+    """Extract the target path from command args (--repo, --binary, or --url).
+
+    Accepts both `--flag value` and `--flag=value` forms. Pre-fix
+    only the space-separated form was recognised — operators
+    using the canonical `--repo=/path/to/repo` form (common in
+    CI YAML / scripts) had `_extract_target` return None,
+    breaking downstream lifecycle initialisation that relies on
+    the target path for project resolution.
+    """
     for flag in ("--repo", "--binary", "--url"):
+        # `--flag value` form.
         if flag in args:
             idx = args.index(flag)
             if idx + 1 < len(args):
                 return args[idx + 1]
+        # `--flag=value` form.
+        prefix = f"{flag}="
+        for arg in args:
+            if arg.startswith(prefix):
+                return arg[len(prefix):]
     return None
 
 
@@ -141,12 +155,27 @@ def _run_with_lifecycle(command: str, script_path: Path, args: list,
                     sarif = json.loads(sf.read_text())
                     for run in (sarif.get("runs") or []):
                         for result in (run.get("results") or []):
-                            locs = result.get("locations") or [{}]
+                            # Defensive locations[] guard. Pre-fix
+                            # `result.get("locations") or [{}]` only
+                            # handled None and empty list — but
+                            # malformed SARIF emitters sometimes ship
+                            # `locations` as a single dict (instead
+                            # of array of dicts). Then `locs[0]`
+                            # raised KeyError 0 (dict has no integer
+                            # key) and the whole sarif-parse loop
+                            # crashed for the file. isinstance guard
+                            # falls back to `[{}]` so we get the
+                            # "unknown" path string instead of a
+                            # crash.
+                            locs = result.get("locations")
+                            if not isinstance(locs, list) or not locs:
+                                locs = [{}]
+                            first = locs[0] if isinstance(locs[0], dict) else {}
                             findings.append({
                                 "rule_id": result.get("ruleId", "unknown"),
                                 "level": result.get("level", "warning"),
                                 "message": (result.get("message") or {}).get("text", ""),
-                                "file_path": (locs[0]
+                                "file_path": (first
                                               .get("physicalLocation", {})
                                               .get("artifactLocation", {})
                                               .get("uri", "unknown")),
@@ -186,6 +215,25 @@ def _run_script(script_path: Path, args: list) -> int:
         return result.returncode
     except KeyboardInterrupt:
         print("\n\nInterrupted by user")
+        # Mark any active run as cancelled. Pre-fix Ctrl-C
+        # left runs in `status="in_progress"` forever — the
+        # next /scan or /agentic invocation saw a stale
+        # "active" run from yesterday's interrupted session
+        # and either appended to it (corrupting findings
+        # comparison) or refused to start ("a run is already
+        # active"). cancel_run flips status to "cancelled"
+        # and clears the active-run pointer; subsequent
+        # invocations get a clean slate.
+        try:
+            from core.sandbox.summary import get_active_run_dir
+            from core.run.metadata import cancel_run
+            active = get_active_run_dir()
+            if active:
+                cancel_run(active)
+        except Exception:
+            # Best-effort. Don't mask the original Ctrl-C
+            # by raising secondary errors during cleanup.
+            pass
         return 130
     except Exception as e:
         print(f"\n✗ Error running {script_path.name}: {e}")

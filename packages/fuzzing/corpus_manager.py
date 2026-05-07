@@ -21,7 +21,45 @@ class CorpusManager:
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
 
     def add_seed(self, data: bytes, name: str) -> Path:
-        """Add a seed input to corpus."""
+        """Add a seed input to corpus.
+
+        `name` MUST be a single bare filename. Pre-fix
+        `self.corpus_dir / name` interpolated whatever the
+        caller passed — for `name="../../etc/cron.daily/evil"`
+        the joined path escaped corpus_dir entirely. The
+        `write_bytes` then created files OUTSIDE the corpus,
+        with attacker-supplied content.
+
+        Real attack vector: corpus seeding is sometimes driven
+        by automated pipelines that pull seed names from
+        external sources (CVE PoC catalogues, fuzzing
+        leaderboard exports). A malicious entry with a
+        traversal-shaped name plants files anywhere the
+        analyser process can write.
+
+        Reject:
+          * Names containing `/` or `\\`.
+          * `..` segments.
+          * NUL bytes.
+          * Empty / whitespace-only names.
+
+        Path traversal in seed names is structurally never
+        legitimate — corpus seeds are flat-filename by
+        convention.
+        """
+        if (
+            not name
+            or not name.strip()
+            or "/" in name
+            or "\\" in name
+            or "\x00" in name
+            or name in {".", ".."}
+            or name.startswith("..")
+        ):
+            raise ValueError(
+                f"corpus seed name must be a single bare filename "
+                f"(got {name!r})"
+            )
         seed_file = self.corpus_dir / name
         seed_file.write_bytes(data)
         logger.debug(f"Added seed: {name} ({len(data)} bytes)")
