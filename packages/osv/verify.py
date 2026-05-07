@@ -152,6 +152,30 @@ def verify(
                 notes=f"same sha on slug={s!r}, not our {pslug!r}",
             )
 
+    # Mirror-slug check across the UNION of ref_pairs and
+    # range_pairs. Pre-fix the mirror-slug-detection branch
+    # only ran inside the `range_pairs` loop — if the same SHA
+    # was listed in `ref_pairs` under a DIFFERENT slug from
+    # ours (canonical mirror situation: OSV's `references[]`
+    # lists the upstream `linux/kernel` repo while our pick
+    # used the `torvalds/linux` mirror), the pre-fix code
+    # never reached the mirror verdict; it fell through to
+    # LIKELY_HALLUCINATION because the slug didn't match
+    # `pslug` in the ref_pairs loop. Real mirror situations
+    # were misclassified as hallucinations, blocking valid
+    # cve_diff results.
+    for s, sha in ref_pairs:
+        if (
+            s != pslug
+            and sha.startswith(psha[:12]) and psha.startswith(sha[:12])
+        ):
+            return OracleVerdict(
+                cve_id=cve_id, picked_slug=picked_slug, picked_sha=picked_sha,
+                verdict=Verdict.MIRROR_DIFFERENT_SLUG, source=source_label,
+                expected_slugs=expected_slugs, expected_shas=expected_shas,
+                notes=f"same sha on slug={s!r} (from references), not our {pslug!r}",
+            )
+
     if pslug in expected_slugs:
         return OracleVerdict(
             cve_id=cve_id, picked_slug=picked_slug, picked_sha=picked_sha,
