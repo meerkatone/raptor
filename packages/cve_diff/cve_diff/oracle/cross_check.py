@@ -152,9 +152,18 @@ def main() -> int:
             if i % 20 == 0:
                 print(f"  … {i}/{len(results)}", file=sys.stderr)
 
-    # Aggregate markdown
+    # Aggregate markdown.
+    # `errors="replace"` so a stray surrogate or other non-roundtripable
+    # codepoint (rare but possible — CVE descriptions sometimes carry
+    # half-decoded UTF-16 from upstream feeds; LLM-generated content
+    # can hold lone surrogates from token-truncation artefacts) gets
+    # written as the replacement char `?` instead of raising
+    # UnicodeEncodeError. Pre-fix the strict-default behaviour
+    # crashed the oracle run mid-write — operator saw partial
+    # JSONL written with NO oracle_summary.md, blamed an oracle
+    # bug rather than the upstream feed encoding issue.
     md = _render_markdown(summary_path.name, results, verdicts_by_status)
-    (out_dir / "oracle_summary.md").write_text(md, encoding="utf-8")
+    (out_dir / "oracle_summary.md").write_text(md, encoding="utf-8", errors="replace")
 
     # Headline to stderr
     pass_results = verdicts_by_status.get("PASS", [])
