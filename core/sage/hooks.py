@@ -8,6 +8,7 @@ scan 1 stores findings, scan 2 recalls them as context.
 All hooks are no-ops when SAGE is unavailable.
 """
 
+import math
 import os
 import threading
 import time
@@ -48,8 +49,18 @@ def _throttle() -> None:
         ms = float(os.getenv("SAGE_PROPOSE_DELAY_MS", "0"))
     except (TypeError, ValueError):
         return
+    # Reject non-finite (NaN, +/-Infinity). `float("inf") / 1000` is
+    # still inf and `time.sleep(inf)` blocks forever — every SAGE
+    # propose hangs the parent process. `nan` slips past `> 0` (NaN
+    # comparisons are False) so it's harmless on its own, but
+    # asserting finiteness is cheaper than auditing every downstream
+    # use. Cap at 5 minutes — `SAGE_PROPOSE_DELAY_MS=999999999` is
+    # almost certainly a typo, not deliberate, and a 12-day per-call
+    # delay is indistinguishable from a hang.
+    if not math.isfinite(ms):
+        return
     if ms > 0:
-        time.sleep(ms / 1000)
+        time.sleep(min(ms, 300_000) / 1000)
 
 
 def _get_client() -> Optional[SageClient]:
