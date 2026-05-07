@@ -409,15 +409,32 @@ class AFLRunner:
                     break
 
         finally:
-            # Stop all AFL instances
+            # Stop all AFL instances. Use communicate(timeout=5)
+            # NOT wait(timeout=5) — pre-fix `proc.wait()` could
+            # deadlock indefinitely if AFL had buffered output in
+            # the stderr PIPE that no one had drained (stdout is
+            # DEVNULL post-batch-450; stderr is still PIPE for
+            # diagnostic capture). On SIGTERM AFL writes a
+            # shutdown banner + final stats to stderr — for
+            # campaigns that ran long enough to fill 64KB of
+            # stderr, wait() blocked forever waiting for the
+            # process to exit while the process blocked forever
+            # waiting for stderr-pipe space. communicate() drains
+            # the pipe and waits in a single thread-safe call.
             logger.info("Stopping AFL instances...")
             for name, proc in processes:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    proc.communicate(timeout=5)
                 except subprocess.TimeoutExpired:
                     logger.warning(f"Force killing {name}")
                     proc.kill()
+                    try:
+                        proc.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        # Kernel-level wedge — at this point we've
+                        # done what we can; orphan the proc.
+                        pass
 
         # Count final crashes
         total_crashes = 0
