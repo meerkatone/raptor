@@ -426,6 +426,24 @@ class BuildDetector:
             logger.debug(f"No validation command for {build_system.type}")
             return True  # Assume it's OK if we can't validate
 
+        # Pre-flight working_dir exists + is a directory. Pre-fix
+        # we passed `cwd=build_system.working_dir` directly to the
+        # subprocess; if the path was synthesised to a non-
+        # existent location (e.g. detection picked a build-system
+        # candidate whose parent was deleted between detection
+        # and validation, or a stale BuildSystem object was
+        # serialised across runs), Popen raised FileNotFoundError
+        # for the cwd — but the operator-visible error read as
+        # "build tool not found", confusing the diagnosis. Check
+        # explicitly so the warning identifies the actual issue.
+        wd = Path(build_system.working_dir) if build_system.working_dir else None
+        if wd is not None and not wd.is_dir():
+            logger.warning(
+                "✗ %s validation skipped: working_dir %r doesn't exist",
+                build_system.type, str(wd),
+            )
+            return False
+
         try:
             result = _run_trusted(  # --version checks only
                 validation_cmd,
