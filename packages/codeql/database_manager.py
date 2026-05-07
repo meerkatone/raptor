@@ -448,7 +448,31 @@ class DatabaseManager:
                 evict = True
         if not evict:
             return
+        # Pre-check the canonical path right before rename so a race
+        # with another evictor / cleanup process surfaces as a fast
+        # short-circuit rather than as a silenced OSError. Without
+        # this guard, the missing-canonical case fell through into
+        # the `os.rename` at the bottom which raised ENOENT, which
+        # the bare `except OSError` swallowed — so we couldn't
+        # distinguish "harmless race" from "logic bug".
+        try:
+            real_canonical = canonical.resolve()
+        except OSError:
+            return  # canonical disappeared between metadata check and rename
+        if not real_canonical.exists():
+            return
+        # Generate a unique marker — if a previous eviction crashed
+        # mid-rename and left a marker behind, or two evictors raced
+        # to the same `_stale_marker_name`, the second rename would
+        # fail with ENOTEMPTY (POSIX rename refuses to clobber a
+        # non-empty target directory). Append a short uniquifier so
+        # the eviction always succeeds for the canonical-path case
+        # we actually care about.
         marker = canonical.with_name(self._stale_marker_name(canonical))
+        if marker.exists():
+            marker = canonical.with_name(
+                f"{self._stale_marker_name(canonical)}.{os.getpid()}.{int(time.monotonic_ns() % 1_000_000)}"
+            )
         try:
             os.rename(canonical, marker)
         except OSError:
