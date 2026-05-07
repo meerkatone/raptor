@@ -929,6 +929,32 @@ class CrashAnalyser:
         if not address or address in ("unknown", ""):
             return "No crash address available for disassembly"
 
+        # Validate address format. Pre-fix the address came from
+        # parsed debugger output (lldb / gdb stack frames) and was
+        # passed to `objdump --start-address=` without verifying
+        # it was a clean hex string. Three risks:
+        #   1. Garbage like `0x123<x>` would have caused objdump to
+        #      reject the arg with an unfriendly error message
+        #      that the operator then saw in the report.
+        #   2. Adversarially-crafted parsed address (if the
+        #      stack-trace format changed in a future debugger
+        #      version and the parser captured something
+        #      unexpected) could attempt to inject extra args
+        #      via spaces / shell metacharacters.
+        #      `_run_trusted` uses argv-list invocation so direct
+        #      shell injection isn't possible, but `--start-address=...`
+        #      with embedded `=` characters could still confuse
+        #      objdump's own arg parser.
+        #   3. Truncated addresses cause objdump to disassemble
+        #      from a wrong-but-valid memory location, yielding
+        #      bogus disassembly that gets reported.
+        if not is_valid_hex_address(address):
+            logger.debug(
+                "Skipping disassembly — address %r failed hex validation",
+                address,
+            )
+            return f"Disassembly skipped: invalid address format ({address!r})"
+
         try:
             # Use objdump for simple disassembly with more context
             result = _run_trusted(
