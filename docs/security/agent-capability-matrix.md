@@ -19,7 +19,7 @@ Generated 2026-04-22. Anti-prompt-injection initiative, Commit 3 audit.
 | coverage-analyzer | all tools (default) | YES | YES | NO | 2 | needs-tightening |
 | crash-analysis-agent | Read, Write, Edit, Bash, Grep, Glob, WebFetch, WebSearch, Git, Task | YES | YES | YES | 3 | needs-HITL |
 | crash-analyzer | all tools (default) | YES | YES | NO | 2 | needs-tightening |
-| crash-analyzer-checker | all tools (default) | YES | YES | NO | 2 | needs-tightening |
+| crash-analysis-checker | all tools (default) | YES | YES | NO | 2 | needs-tightening |
 | exploitability-validator-agent | Read, Write, Edit, Bash, Grep, Glob, Task | YES | YES | NO | 2 | needs-tightening |
 | function-trace-generator | all tools (default) | YES | YES | NO | 2 | needs-tightening |
 | offsec-specialist | all tools (default) | YES | YES | YES | 3 | needs-HITL |
@@ -56,7 +56,7 @@ Generated 2026-04-22. Anti-prompt-injection initiative, Commit 3 audit.
 - **B=YES** because: Implicit unrestricted Bash (needed to run rr replay, set breakpoints, evaluate debugger output). Agent documentation shows rr command execution.
 - **Verdict**: needs-tightening — Purpose is analysis-only on pre-generated data; no write tools documented needed. Recommend dropping Bash access and instead providing structured rr/gcov output via read-only interface. Write-up generation should use a separate pure-analysis agent without shell.
 
-### crash-analyzer-checker
+### crash-analysis-checker
 - **Purpose**: Validate root-cause analysis reports for correctness against empirical data
 - **A=YES** because: Reads root-cause hypothesis and validates against rr recordings, function traces, coverage data (all from untrusted crash inputs)
 - **B=YES** because: Implicit unrestricted Bash for running grep checks and validating hypothesis content (see mechanical format check directives)
@@ -175,7 +175,7 @@ Sorted by priority:
    - **Rationale**: Analysis-only purpose, but has Bash for running debugger commands. Recommend: pre-compute rr output, pass as structured data
    - **Implementation**: Have crash-analysis-agent prepare rr output as JSON, pass to crash-analyzer which reads JSON only (no shell)
 
-6. **crash-analyzer-checker** (needs-tightening)
+6. **crash-analysis-checker** (needs-tightening)
    - **Action**: Drop Bash; have callers pre-compute format validation flags
    - **Rationale**: Checker consuming untrusted data. Mechanical format checks should not require shell access.
    - **Implementation**: Require input to include format validation metadata; checker only reads structured input
@@ -247,7 +247,7 @@ Sorted by priority:
 - Recommendation: use Write only for working directory artifacts; never write untrusted input to shared locations
 
 **Pattern 2: Checker/aggregator agents consuming raw untrusted data**
-- crash-analyzer-checker reads untrusted crash hypothesis + empirical data; should consume only validated hypothesis
+- crash-analysis-checker reads untrusted crash hypothesis + empirical data; should consume only validated hypothesis
 - oss-evidence-verifier reads untrusted evidence; should consume only verified evidence
 - Recommendation: pipeline should validate data before passing to checker agents
 
@@ -257,7 +257,7 @@ Sorted by priority:
 - Recommendation: add domain allowlist to all WebFetch tools (github.com, web.archive.org, etc.)
 
 **Pattern 4: Default "all tools" agents**
-- coverage-analyzer, crash-analyzer, crash-analyzer-checker, function-trace-generator, offsec-specialist all default to all tools
+- coverage-analyzer, crash-analyzer, crash-analysis-checker, function-trace-generator, offsec-specialist all default to all tools
 - No documented tool scope limitation
 - Recommendation: explicitly specify tool list for each agent; never rely on defaults
 
