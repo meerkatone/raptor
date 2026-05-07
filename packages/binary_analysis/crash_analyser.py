@@ -730,13 +730,26 @@ class CrashAnalyser:
         for line in lines:
             if "->" in line and "0x" in line and not crash_instruction_found:
                 context.crash_instruction = line.strip()
-                # Extract address
+                # Extract + validate address. Pre-fix the captured
+                # `addr_part` was stored straight to
+                # `context.crash_address` without validation —
+                # malformed input (e.g. `0x123<garbage>`,
+                # truncated `0x` with no digits, addresses with
+                # 20+ chars where the 18-char slice cuts mid-
+                # number) flowed through to downstream consumers
+                # (addr2line, LLM prompt, report) which then
+                # treated them as if they were real addresses.
                 if "0x" in line:
                     addr_start = line.index("0x")
                     addr_end = addr_start + 18
                     addr_part = line[addr_start:addr_end].split()[0]
-                    if addr_part.startswith("0x"):
+                    if is_valid_hex_address(addr_part):
                         context.crash_address = addr_part
+                    else:
+                        logger.debug(
+                            "Discarding malformed crash address %r from line",
+                            addr_part,
+                        )
                 crash_instruction_found = True
                 logger.debug(f"Found crash instruction: {context.crash_instruction}")
 
