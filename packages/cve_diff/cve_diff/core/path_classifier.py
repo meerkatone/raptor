@@ -41,6 +41,20 @@ _TEST_PATH_RE = re.compile(
 )
 
 
+# File paths are bounded by NAME_MAX (255) per component and PATH_MAX
+# (4096) per full path on Linux. A real diff entry above 4 KB is
+# essentially never legitimate; cap before regex to avoid handing the
+# matcher pathological input. The four alternations each scan
+# `[^/]+` greedily — concatenating them across a 1 MB single-
+# component string would still complete linearly in CPython's regex
+# engine, but the WALL TIME for "is this a test path" was measurable
+# (>10 ms) on 100 KB inputs, which is unacceptable for a pure
+# classification helper called once per file in a diff. Cap fits
+# well above PATH_MAX to leave room for path prefixes added by
+# upstream tools (`a/`, `b/`, repo-relative roots).
+_PATH_LEN_CAP = 8 * 1024
+
+
 def is_test_path(path: str) -> bool:
     """Heuristic: does this file path look like test or fixture content?
 
@@ -52,5 +66,13 @@ def is_test_path(path: str) -> bool:
 
     Used to populate ``FileChange.is_test`` consistently across every
     extractor (clone, GitHub API, GitLab API, patch URL).
+
+    Returns False for paths longer than ``_PATH_LEN_CAP`` rather than
+    spending wallclock matching against pathological input — see the
+    cap's docstring for the threat model.
     """
-    return bool(_TEST_PATH_RE.search(path or ""))
+    if not path:
+        return False
+    if len(path) > _PATH_LEN_CAP:
+        return False
+    return bool(_TEST_PATH_RE.search(path))
