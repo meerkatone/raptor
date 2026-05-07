@@ -392,6 +392,18 @@ def validate_dataflow_claims(
         "skipped_reason": "",
     }
 
+    # Master kill-switch — bail before doing any work.
+    try:
+        from core.config import RaptorConfig
+        if not RaptorConfig.IRIS_TIER1_ENABLED:
+            logger.info(
+                "dataflow validation skipped: IRIS_TIER1_ENABLED is False",
+            )
+            metrics["skipped_reason"] = "tier1_disabled"
+            return metrics
+    except ImportError:
+        pass
+
     # Normalise inputs: accept either a single DB or a per-language dict.
     # The single-DB path remains for callers that don't care about
     # language matching (legacy / tests).
@@ -676,6 +688,19 @@ def tier1_check_finding(
         target_path: Repo root for evidence audit-trail. Defaults to
             the database path when not supplied.
     """
+    # Master kill-switch — operators can disable Tier 1 globally via
+    # `RaptorConfig.IRIS_TIER1_ENABLED = False` (or the per-consumer
+    # CLI flags that flip this). All four consumers route through
+    # this helper, so a single early-out covers /exploit and /validate
+    # without further plumbing.
+    try:
+        from core.config import RaptorConfig
+        if not RaptorConfig.IRIS_TIER1_ENABLED:
+            logger.debug("tier1_check_finding: disabled via IRIS_TIER1_ENABLED")
+            return "no_check"
+    except ImportError:
+        pass
+
     language = _finding_language(finding)
     if not language:
         return "no_check"

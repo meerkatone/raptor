@@ -608,6 +608,12 @@ Examples:
     parser.add_argument("--out", help="Output directory (auto-generated if not specified)")
     parser.add_argument("--min-files", type=int, default=3, help="Minimum files to detect language")
     parser.add_argument("--codeql-cli", help="Path to CodeQL CLI (auto-detected if not specified)")
+    parser.add_argument(
+        "--no-iris-tier1", action="store_true",
+        help="Skip the IRIS Tier 1 in-repo LocalFlowSource pack analysis. "
+             "Use when the in-repo packs produce noise on a specific target "
+             "or when comparing stdlib-only vs LocalFlowSource verdicts.",
+    )
 
     # Sandbox CLI flags (--sandbox / --no-sandbox / --audit / --audit-verbose)
     # so the agentic-driven invocation can propagate audit mode into this
@@ -618,6 +624,13 @@ Examples:
 
     args = parser.parse_args()
     apply_cli_args(args, parser=parser)
+
+    # Flip the IRIS Tier 1 master switch for this invocation. The
+    # config is process-scoped so /codeql subprocesses don't bleed
+    # into other consumers. Reset is implicit (process exit).
+    if args.no_iris_tier1:
+        from core.config import RaptorConfig
+        RaptorConfig.IRIS_TIER1_ENABLED = False
 
     # Parse languages
     languages = None

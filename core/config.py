@@ -74,6 +74,22 @@ class RaptorConfig:
         REPO_ROOT / "packages" / "llm_analysis" / "codeql_packs",
     ]
 
+    # IRIS Tier 1 master kill-switch. When False, all four consumers
+    # (`/agentic --validate-dataflow`, `/exploit` pre-flight gate,
+    # `/codeql analyze_iris_packs`, `/validate` Stage B gate) skip the
+    # Tier 1 dataflow check entirely. Designed for the unlikely-but-
+    # possible case where Tier 1 produces unwanted output on a given
+    # target — e.g. excessive coverage-gap warnings on a stale DB,
+    # an operator wanting to bypass refute downgrades temporarily, or
+    # debugging a Tier 1 vs Tier 2 disagreement. Defaults to True so
+    # the free signal is on by default everywhere.
+    #
+    # Per-consumer CLI flags can override this at run scope:
+    #   /codeql --no-iris-tier1
+    #   /agentic --no-validate-dataflow      (existing flag, broader)
+    # /exploit and /validate inherit through `tier1_check_finding`.
+    IRIS_TIER1_ENABLED: bool = True
+
     # Timeout Configuration (seconds)
     DEFAULT_TIMEOUT = 1800          # 30 minutes
     SEMGREP_TIMEOUT = 900            # 15 minutes (scan over local rule dirs)

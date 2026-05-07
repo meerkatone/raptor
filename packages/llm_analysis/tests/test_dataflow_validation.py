@@ -1335,6 +1335,50 @@ class TestCallableInventoryProbe:
         assert verdict == "inconclusive"
 
 
+class TestIrisTier1KillSwitch:
+    """RaptorConfig.IRIS_TIER1_ENABLED master kill-switch. All four
+    consumers (`/agentic --validate-dataflow`, `/exploit` pre-flight
+    gate, `/codeql analyze_iris_packs`, `/validate` Stage B gate)
+    route through one of: tier1_check_finding, validate_dataflow_claims,
+    or analyze_iris_packs. Each must early-out when the switch is False.
+    """
+
+    def test_tier1_check_finding_disabled_returns_no_check(self, monkeypatch):
+        from core.config import RaptorConfig
+        from packages.llm_analysis.dataflow_validation import tier1_check_finding
+        monkeypatch.setattr(RaptorConfig, "IRIS_TIER1_ENABLED", False)
+        # No discovery, no DB lookup — disabled means immediate no_check.
+        with patch(
+            "packages.llm_analysis.dataflow_validation.discover_prebuilt_query"
+        ) as mock_disc:
+            verdict = tier1_check_finding(
+                {"file_path": "x.py", "language": "python", "cwe_id": "CWE-78"},
+                {"python": Path("/tmp/db")},
+            )
+        assert verdict == "no_check"
+        mock_disc.assert_not_called()
+
+    def test_validate_dataflow_claims_disabled_returns_skipped(self, monkeypatch):
+        from core.config import RaptorConfig
+        from packages.llm_analysis.dataflow_validation import validate_dataflow_claims
+        monkeypatch.setattr(RaptorConfig, "IRIS_TIER1_ENABLED", False)
+        metrics = validate_dataflow_claims(
+            findings=[{"finding_id": "f1"}],
+            results_by_id={"f1": {"is_exploitable": True}},
+            codeql_db=Path("/tmp/db"),
+            repo_path=Path("/tmp/repo"),
+            llm_client=MagicMock(),
+        )
+        assert metrics["skipped_reason"] == "tier1_disabled"
+        assert metrics["n_validated"] == 0
+
+    def test_default_enabled_when_unset(self):
+        """Default state: kill-switch is on (Tier 1 enabled). Don't break
+        the shipping default by accident."""
+        from core.config import RaptorConfig
+        assert RaptorConfig.IRIS_TIER1_ENABLED is True
+
+
 class TestCompileErrorDetection:
     def test_detects_could_not_resolve(self):
         assert _is_compile_error("ERROR: could not resolve type Foo")
