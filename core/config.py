@@ -176,8 +176,32 @@ class RaptorConfig:
     ENV_JOB_ID = "RAPTOR_JOB_ID"
     ENV_LLM_CMD = "RAPTOR_LLM_CMD"
 
-    # LLM Provider Configuration
-    OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    # LLM Provider Configuration.
+    #
+    # OLLAMA_HOST reads the env var on every access so a runtime
+    # change (test setup that sets OLLAMA_HOST after importing a
+    # consumer; an operator sourcing a shell rc after RAPTOR is
+    # already imported) is picked up. Pre-fix it was evaluated once
+    # at class definition time:
+    #
+    #     OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    #
+    # Any later env-var change was silently ignored — consumers
+    # held the stale `http://localhost:11434` default even when
+    # OLLAMA_HOST was set immediately after. Tests that set the env
+    # then imported the consumer module saw the wrong value with no
+    # diagnostic.
+    #
+    # Implement as a descriptor so both `RaptorConfig.OLLAMA_HOST`
+    # (class access; the existing call pattern across `core/llm/`)
+    # and `RaptorConfig().OLLAMA_HOST` (instance access; rare but
+    # supported) re-read the env var on every access. `__get__` is
+    # invoked for both class and instance reads.
+    class _OllamaHostDescriptor:
+        def __get__(self, obj, objtype=None):
+            return os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+    OLLAMA_HOST = _OllamaHostDescriptor()
 
     # Proxy variables to strip for security
     PROXY_ENV_VARS = [
