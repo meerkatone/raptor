@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, Optional
 import platform
 
+from core.config import RaptorConfig
 from core.hash import sha256_string
 from core.logging import get_logger
 from packages.binary_analysis._validators import is_valid_hex_address
@@ -1238,7 +1239,19 @@ class CrashAnalyser:
                 capture_output=True,
                 text=True,
                 timeout=30,
-                env={**os.environ, "ASAN_OPTIONS": "abort_on_error=0:print_stacktrace=1"},
+                # Use get_safe_env() as the base, NOT os.environ.
+                # Pre-fix `{**os.environ, "ASAN_OPTIONS": ...}`
+                # passed the operator's full env (LLM API keys,
+                # AWS_*, GH_TOKEN, RAPTOR_internal vars) through
+                # to the binary being analysed. The crash binary
+                # is by definition INTERESTING — it crashed under
+                # adversarial input — and may have a malicious
+                # input that exfiltrates getenv() results into
+                # the crash output, which we then write to the
+                # report. Same threat model as fuzzing/afl_runner
+                # batch 454.
+                env={**RaptorConfig.get_safe_env(),
+                     "ASAN_OPTIONS": "abort_on_error=0:print_stacktrace=1"},
             )
             
             # Combine stdout and stderr (ASan reports to stderr)
