@@ -32,16 +32,39 @@ def lookup_function(checklist: Dict[str, Any], file_path: str, line: int,
         checklist: Inventory dict from build_inventory (has "files" key)
         file_path: Path to the file (absolute, relative, or file:// URI)
         line: Line number within the file
-        repo_root: Repository root for path normalisation
+        repo_root: Repository root for path normalisation. Optional ONLY
+            when ``file_path`` is relative — absolute paths and
+            ``file://`` URIs MUST be paired with a non-empty
+            ``repo_root`` so `normalise_path` can convert them to a
+            checklist-relative form. Pre-fix the silent ``""`` default
+            made absolute paths fail to match: `os.path.relpath(
+            abs_path, "")` returns a path relative to the current
+            working directory, not the inventory's repo root. The
+            checklist (built with rel paths) never matched the
+            relpath-against-cwd result, and `lookup_function` silently
+            returned ``None`` — the agentic enrichment pipeline lost
+            function metadata for findings whose source carried abs
+            paths (most CodeQL output).
 
     Returns:
         Function dict from the checklist, or None if no match.
         Prefers exact match (line within line_start..line_end).
         Falls back to closest function starting before the line, but only
         when the candidate has no line_end (can't determine boundaries).
+
+    Raises:
+        ValueError: if ``file_path`` is absolute (or a file:// URI) but
+            ``repo_root`` is empty.
     """
     if not checklist or not file_path or not line:
         return None
+
+    after_scheme = file_path[7:] if file_path.startswith("file://") else file_path
+    if os.path.isabs(after_scheme) and not repo_root:
+        raise ValueError(
+            f"lookup_function: absolute file_path={file_path!r} "
+            f"requires non-empty repo_root for normalisation"
+        )
 
     norm_path = normalise_path(file_path, repo_root)
 
