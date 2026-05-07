@@ -38,15 +38,35 @@ def _step_label(step: dict[str, Any]) -> str:
 
 def _parse_file_line(loc: str) -> tuple[str | None, int]:
     """Parse 'path/to/file.py:42' into ('path/to/file.py', 42).
-    Returns (None, 0) if the string doesn't match the pattern."""
+    Returns (None, 0) if the string doesn't match the pattern.
+
+    Validate path-shape on the file portion. Pre-fix
+    `parts[0]` was returned without checking — input like
+    `:42` (empty path), `   :42` (whitespace path), or
+    `a:b:c:42` (after `rsplit(":", 1)` the path part still
+    contains `:`) was returned as a "file path" that
+    downstream consumers (file matching, branch attachment)
+    couldn't sensibly compare against real step file paths,
+    causing matching to silently miss legitimate
+    correspondences.
+    """
     if not loc:
         return None, 0
     parts = loc.rsplit(":", 1)
     if len(parts) == 2:
         try:
-            return parts[0], int(parts[1])
+            line_num = int(parts[1])
         except ValueError:
-            pass
+            return None, 0
+        file_part = parts[0].strip()
+        # Reject empty / whitespace-only / clearly-non-path
+        # results. A legitimate path can contain `:` (Windows
+        # drive letters, time-prefixed log lines that someone
+        # mistakenly passed through here), so we don't reject
+        # those — we just require non-empty after strip.
+        if not file_part:
+            return None, 0
+        return file_part, line_num
     return None, 0
 
 
