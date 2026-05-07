@@ -5,6 +5,7 @@ into a single output directory. Deduplicates findings by (file, function, line),
 latest wins.
 """
 
+import hashlib as _hashlib
 import re
 import shutil
 from pathlib import Path
@@ -50,14 +51,40 @@ def _is_known_file(name: str) -> bool:
 
 
 def _extract_date_from_dir(run_dir: Path) -> str:
-    """Extract a date-like suffix from a run directory name for collision renaming."""
+    """Extract a date-like suffix from a run directory name for collision renaming.
+
+    Fallback: when no date pattern matches, derive a short
+    deterministic suffix from a SHA-256 of the dir name. Pre-fix
+    the fallback returned `run_dir.name` verbatim, which:
+
+    * could be arbitrarily long
+      (`scan_libxml_v2_attempt_3_postfix_with_extra_notes`) — when
+      composed into a `<finding-id>__<suffix>` collision-renamed
+      key, the resulting filename blew past `NAME_MAX` (255 on
+      ext4) and the rename failed
+    * leaked free-form operator notes from the run dir name into
+      collision-renamed file paths, where they showed up in
+      report listings the operator didn't expect
+    * collided across two runs whose dir names happened to start
+      with the same prefix once the date-pattern fallback was
+      missed (rare but possible with hand-named dirs)
+
+    The 12-char hash is deterministic (same input → same output,
+    so collision-renamed files stay stable across re-merges) and
+    short enough to not bloat downstream filenames.
+    """
     match = re.search(r'(\d{8}[-_]\d{6})', run_dir.name)
     if match:
         return match.group(1)
     match = re.search(r'(\d{8})', run_dir.name)
     if match:
         return match.group(1)
-    return run_dir.name
+    return _content_suffix(run_dir.name)
+
+
+def _content_suffix(name: str) -> str:
+    """Short SHA-256 prefix for collision-rename suffixes."""
+    return _hashlib.sha256(name.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 def _finding_key(finding: Dict[str, Any]) -> tuple:
