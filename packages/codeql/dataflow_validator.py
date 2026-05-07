@@ -103,8 +103,25 @@ def _infer_bv_profile(rule_id: Optional[str], llm_hint: Dict) -> BVProfile:
     heuristic_signed = False  # unsigned is correct for most path conditions
 
     # Accept only sensible LLM-emitted values; ignore anything else.
+    # Pre-fix `raw_width > 0` accepted any positive int including
+    # absurd values (LLMs occasionally emit `width: 128`, `width:
+    # 1000`, or worse — `width: 1000000` once observed). Z3 would
+    # accept those technically but produce massively oversized
+    # bitvector encodings consuming GBs of memory and seconds
+    # per check. Clamp to the standard C-integer widths
+    # {8, 16, 32, 64}; anything else falls back to heuristic.
+    # `bool` excluded because `isinstance(True, int)` is True
+    # (subclass) and `True > 0` is True — a width=True hint
+    # would otherwise pass the gate.
     raw_width = llm_hint.get("width")
-    width = raw_width if isinstance(raw_width, int) and raw_width > 0 else heuristic_width
+    if (
+        isinstance(raw_width, int)
+        and not isinstance(raw_width, bool)
+        and raw_width in {8, 16, 32, 64}
+    ):
+        width = raw_width
+    else:
+        width = heuristic_width
 
     raw_signed = llm_hint.get("signed")
     signed = raw_signed if isinstance(raw_signed, bool) else heuristic_signed
