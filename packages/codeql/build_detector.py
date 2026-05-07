@@ -277,7 +277,23 @@ class BuildDetector:
 
             # Check for extension match (e.g., *.csproj)
             if build_file.startswith("."):
-                matches = list(self.repo_path.rglob(f"*{build_file}"))
+                # Sort matches for determinism. `rglob` returns
+                # filesystem-iteration order (varies between
+                # machines and even between runs on the same
+                # machine after FS metadata reordering); without
+                # sorting `matches[0].parent` was non-
+                # deterministic — repos with multiple .csproj /
+                # .sln / .gradle files picked DIFFERENT
+                # working_dirs across runs, producing different
+                # CodeQL DBs and different SARIF outputs for the
+                # same source. Sort by path string to pin the
+                # selection to "shallowest-then-alphabetical"
+                # which matches operator intuition for "primary"
+                # build root.
+                matches = sorted(
+                    self.repo_path.rglob(f"*{build_file}"),
+                    key=lambda p: (len(p.parts), str(p)),
+                )
                 if matches:
                     detected_files.append(build_file)
                     # Use the directory of the first match WITH
@@ -410,6 +426,24 @@ class BuildDetector:
             logger.debug(f"No validation command for {build_system.type}")
             return True  # Assume it's OK if we can't validate
 
+        # Pre-flight working_dir exists + is a directory. Pre-fix
+        # we passed `cwd=build_system.working_dir` directly to the
+        # subprocess; if the path was synthesised to a non-
+        # existent location (e.g. detection picked a build-system
+        # candidate whose parent was deleted between detection
+        # and validation, or a stale BuildSystem object was
+        # serialised across runs), Popen raised FileNotFoundError
+        # for the cwd — but the operator-visible error read as
+        # "build tool not found", confusing the diagnosis. Check
+        # explicitly so the warning identifies the actual issue.
+        wd = Path(build_system.working_dir) if build_system.working_dir else None
+        if wd is not None and not wd.is_dir():
+            logger.warning(
+                "✗ %s validation skipped: working_dir %r doesn't exist",
+                build_system.type, str(wd),
+            )
+            return False
+
         try:
             result = _run_trusted(  # --version checks only
                 validation_cmd,
@@ -529,8 +563,16 @@ class BuildDetector:
         build_type = "synthesised"
         confidence = 0.7
 
-        # If heuristic has failures, try CC for better flags
-        if failures:
+        # `failures is None` → dry-run never ran (script crashed,
+        # sandbox-launch failed, timeout). We can't measure
+        # whether the heuristic flags work, so don't attempt a
+        # CC-suggest retry (the second dry-run would fail the same
+        # way and waste budget).
+        if failures is None:
+            logger.warning(
+                "  Dry-run didn't execute — using heuristic flags without measurement",
+            )
+        elif failures:
             heuristic_ok = len(source_files) - len(failures)
             logger.info(f"  Dry-run: {heuristic_ok}/{len(source_files)} compiled, {len(failures)} failed")
 
@@ -542,12 +584,15 @@ class BuildDetector:
                     define_flags + cc_flags.get("defines", []),
                 )
                 cc_failures = self._dry_run(script_path, language=language)
-                cc_ok = len(source_files) - len(cc_failures)
-                if cc_ok > heuristic_ok:
-                    logger.info(f"  CC improved: {heuristic_ok} → {cc_ok} compiled")
-                    build_type = "synthesised-cc"
+                if cc_failures is None:
+                    logger.info("  CC retry didn't run — keeping heuristic")
                 else:
-                    logger.info("  CC didn't improve, using heuristic")
+                    cc_ok = len(source_files) - len(cc_failures)
+                    if cc_ok > heuristic_ok:
+                        logger.info(f"  CC improved: {heuristic_ok} → {cc_ok} compiled")
+                        build_type = "synthesised-cc"
+                    else:
+                        logger.info("  CC didn't improve, using heuristic")
                     self._write_build_script(
                         script_path, build_dir,
                         source_files, compiler, include_flags, define_flags,
@@ -726,8 +771,24 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
         script_path.chmod(0o500)
         return script_path
 
-    def _dry_run(self, script_path, language: Optional[str] = None) -> list:
+    def _dry_run(self, script_path, language: Optional[str] = None) -> Optional[list]:
         """Run the build script and return compilation failures.
+
+        Returns:
+          * ``list`` of failures (possibly empty) — script ran to
+            completion. `[]` means "ran successfully, no errors".
+          * ``None`` — script did NOT run at all (subprocess failed to
+            spawn, timeout, sandbox-launch error). Distinct from
+            "ran with zero failures" because the CC-flag-suggest path
+            (which kicks in `if failures:`) shouldn't fire when we
+            simply couldn't measure anything.
+
+        Pre-fix this returned `[]` for both cases. The caller's
+        `if failures:` then took the "no improvement needed" branch
+        when the script crashed at startup (interpreter mismatch,
+        sandbox eviction), silently degrading the synthesised-build
+        flow to "use heuristic flags" when the actual problem was
+        "we never compiled anything to know if the heuristic worked".
 
         `language` is used to pick the env vars the build tool expects
         — for Java synthesised builds we auto-detect JAVA_HOME and
@@ -772,12 +833,30 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
                 tool_paths=_tps or None,
                 capture_output=True, text=True, timeout=300,
             )
-            # Script crash (not compilation failure) — treat as unknown
+            # Script crash (not compilation failure) — treat as
+            # "didn't actually run a build" via None sentinel, NOT
+            # `[]` ("ran with zero failures"). Pre-fix the empty
+            # list collapsed both cases and the CC-flag-suggest
+            # path silently skipped its retry attempt.
             if result.returncode != 0 and "Traceback" in result.stderr:
-                logger.warning(f"Build script crashed: {result.stderr.split(chr(10))[-2]}")
-                return []
-        except (subprocess.TimeoutExpired, Exception):
-            return []
+                # `[-2]` reaches the second-to-last line, but
+                # `result.stderr.split("\n")[-2]` raises IndexError
+                # if stderr has fewer than 2 lines (e.g. the script
+                # crashed before printing anything, or printed a
+                # single line without a trailing newline). Pre-fix
+                # the IndexError aborted the warning emission AND
+                # dropped through to the bare `except Exception`
+                # below, returning [] (now None) but with the
+                # operator-visible cause swallowed. Defensive
+                # slicing: take the last non-empty line, or the
+                # whole stderr if there's only one line.
+                stderr_lines = [l for l in (result.stderr or "").split("\n") if l.strip()]
+                tail = stderr_lines[-1] if stderr_lines else "(no stderr)"
+                logger.warning(f"Build script crashed: {tail}")
+                return None
+        except (subprocess.TimeoutExpired, Exception) as e:
+            logger.warning("Build script never ran (%r) — treating as 'didn't run'", e)
+            return None
 
         # Parse gcc/g++ errors from stderr
         failures = []
@@ -874,7 +953,25 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             if result.returncode != 0 or not result.stdout.strip():
                 return None
 
-            content = strip_json_fences(result.stdout.strip())
+            # Cap JSON parse input. Pre-fix `result.stdout` could be
+            # arbitrarily large (CC model hallucinates and emits MB
+            # of "JSON"; CC subprocess could be tricked into echoing
+            # a large file via Read+output); json.loads would gladly
+            # consume the entire blob, allocating proportional
+            # memory + serialising it through the parser. The
+            # genuine response shape — `{"includes": [...],
+            # "defines": [...]}` with maybe 50 entries each at
+            # <100 chars — comfortably fits in 100KB. Anything
+            # larger is hallucination or attack.
+            _CC_JSON_MAX_BYTES = 100 * 1024
+            stdout = result.stdout.strip()
+            if len(stdout) > _CC_JSON_MAX_BYTES:
+                logger.warning(
+                    "CC suggest-flags output exceeded %d bytes (%d) — rejecting",
+                    _CC_JSON_MAX_BYTES, len(stdout),
+                )
+                return None
+            content = strip_json_fences(stdout)
 
             import json
             try:

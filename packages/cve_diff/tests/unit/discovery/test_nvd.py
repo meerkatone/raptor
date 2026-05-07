@@ -274,13 +274,24 @@ class TestProcessLocalCache:
 
 class TestApiKeyHeader:
     def test_api_key_env_sends_header(self, nvd_stub, monkeypatch) -> None:
-        monkeypatch.setenv("NVD_API_KEY", "test-key-123")
+        # Bug-hunt-6 batch 550 added UUID-format validation to the
+        # NVD client (rejects placeholders like "test-key-123" /
+        # "YOUR_KEY_HERE" before sending — they would otherwise
+        # trigger 401/403 retry storms). Use a real-format UUID
+        # so this happy-path test exercises the header-sending
+        # behaviour rather than the validation-rejection branch.
+        monkeypatch.setenv(
+            "NVD_API_KEY", "12345678-1234-1234-1234-1234567890ab",
+        )
         nvd_stub.add(json=_nvd_payload_with_cpe(
             ["cpe:2.3:a:curl:curl:*:*:*:*:*:*:*:*"],
         ))
         NvdDiscoverer(cache_enabled=False).get_payload("CVE-2024-9999")
         assert len(nvd_stub.calls) == 1
-        assert nvd_stub.calls[0].headers.get("apiKey") == "test-key-123"
+        assert (
+            nvd_stub.calls[0].headers.get("apiKey")
+            == "12345678-1234-1234-1234-1234567890ab"
+        )
 
     def test_no_api_key_sends_no_header(self, nvd_stub, monkeypatch) -> None:
         monkeypatch.delenv("NVD_API_KEY", raising=False)

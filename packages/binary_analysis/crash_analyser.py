@@ -6,6 +6,7 @@ Analyses crashes from fuzzing to extract exploitability information.
 This is so much of a WIP, it's not even funny. However, you can see what we are trying to do and how it could be useful. 
 """
 
+import re
 import subprocess
 from core.sandbox import run as _sandbox_run, run_trusted as _run_trusted
 # _run_trusted: read-only tools (file, readelf, nm, strings, etc.) — no namespace overhead.
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Dict, Optional
 import platform
 
+from core.config import RaptorConfig
 from core.hash import sha256_string
 from core.logging import get_logger
 from packages.binary_analysis._validators import is_valid_hex_address
@@ -729,13 +731,26 @@ class CrashAnalyser:
         for line in lines:
             if "->" in line and "0x" in line and not crash_instruction_found:
                 context.crash_instruction = line.strip()
-                # Extract address
+                # Extract + validate address. Pre-fix the captured
+                # `addr_part` was stored straight to
+                # `context.crash_address` without validation —
+                # malformed input (e.g. `0x123<garbage>`,
+                # truncated `0x` with no digits, addresses with
+                # 20+ chars where the 18-char slice cuts mid-
+                # number) flowed through to downstream consumers
+                # (addr2line, LLM prompt, report) which then
+                # treated them as if they were real addresses.
                 if "0x" in line:
                     addr_start = line.index("0x")
                     addr_end = addr_start + 18
                     addr_part = line[addr_start:addr_end].split()[0]
-                    if addr_part.startswith("0x"):
+                    if is_valid_hex_address(addr_part):
                         context.crash_address = addr_part
+                    else:
+                        logger.debug(
+                            "Discarding malformed crash address %r from line",
+                            addr_part,
+                        )
                 crash_instruction_found = True
                 logger.debug(f"Found crash instruction: {context.crash_instruction}")
 
@@ -914,6 +929,32 @@ class CrashAnalyser:
         if not address or address in ("unknown", ""):
             return "No crash address available for disassembly"
 
+        # Validate address format. Pre-fix the address came from
+        # parsed debugger output (lldb / gdb stack frames) and was
+        # passed to `objdump --start-address=` without verifying
+        # it was a clean hex string. Three risks:
+        #   1. Garbage like `0x123<x>` would have caused objdump to
+        #      reject the arg with an unfriendly error message
+        #      that the operator then saw in the report.
+        #   2. Adversarially-crafted parsed address (if the
+        #      stack-trace format changed in a future debugger
+        #      version and the parser captured something
+        #      unexpected) could attempt to inject extra args
+        #      via spaces / shell metacharacters.
+        #      `_run_trusted` uses argv-list invocation so direct
+        #      shell injection isn't possible, but `--start-address=...`
+        #      with embedded `=` characters could still confuse
+        #      objdump's own arg parser.
+        #   3. Truncated addresses cause objdump to disassemble
+        #      from a wrong-but-valid memory location, yielding
+        #      bogus disassembly that gets reported.
+        if not is_valid_hex_address(address):
+            logger.debug(
+                "Skipping disassembly — address %r failed hex validation",
+                address,
+            )
+            return f"Disassembly skipped: invalid address format ({address!r})"
+
         try:
             # Use objdump for simple disassembly with more context
             result = _run_trusted(
@@ -992,19 +1033,29 @@ class CrashAnalyser:
     def _get_memory_layout_info(self) -> Dict[str, str]:
         """Get information about memory layout and protections."""
         info = {}
-        
+
+        # ASLR detection is platform-specific. Pre-fix the code
+        # tried `sysctl kern.aslr` then fell back to
+        # /proc/sys/kernel/randomize_va_space:
+        #   * macOS doesn't expose `kern.aslr` via sysctl
+        #     (system-wide ASLR is always on since OS X 10.7,
+        #     not operator-controllable). The sysctl call
+        #     returned non-zero with "unknown oid", and the
+        #     /proc fallback then failed because /proc doesn't
+        #     exist on macOS — `info["aslr_enabled"]` was
+        #     never set, leaving the field absent in the
+        #     report.
+        #   * Linux + /proc was fine.
+        # Branch on platform.system() so each OS uses its
+        # canonical detection method.
         try:
-            # Check ASLR status
-            result = _run_trusted(
-                ["sysctl", "kern.aslr"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                info["aslr_enabled"] = "1" in result.stdout
-            else:
-                # Try Linux way
+            sys_platform = platform.system()
+            if sys_platform == "Darwin":
+                # macOS: ASLR has been mandatory since 10.7
+                # (Lion, 2011) and is not operator-controllable.
+                info["aslr_enabled"] = True
+                info["aslr_level"] = "macos-default"
+            elif sys_platform == "Linux":
                 result = _run_trusted(
                     ["cat", "/proc/sys/kernel/randomize_va_space"],
                     capture_output=True,
@@ -1015,6 +1066,21 @@ class CrashAnalyser:
                     aslr_level = result.stdout.strip()
                     info["aslr_enabled"] = aslr_level != "0"
                     info["aslr_level"] = aslr_level
+                else:
+                    info["aslr_enabled"] = "unknown"
+            else:
+                # Other unixes (BSD variants etc) — best-effort
+                # try sysctl, otherwise mark unknown.
+                result = _run_trusted(
+                    ["sysctl", "kern.aslr"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    info["aslr_enabled"] = "1" in result.stdout
+                else:
+                    info["aslr_enabled"] = "unknown"
         except (OSError, subprocess.SubprocessError):
             info["aslr_enabled"] = "unknown"
             
@@ -1064,36 +1130,68 @@ class CrashAnalyser:
         return info
 
     def _detect_environmental_crash(self, context: CrashContext) -> Dict[str, str]:
-        """Detect if crash is environmental (debugger artifacts, etc.)."""
+        """Detect if crash is environmental (debugger artifacts, etc.).
+
+        All keyword checks here use word-boundary matching. Pre-fix
+        the substring `in` comparisons produced misclassifications
+        that flipped real exploitable crashes to "environmental":
+
+          * `"int3" in disassembly_lower` matched any text with
+            "int3" as substring (e.g. token names in symbolic
+            disassemblies).
+          * `"gdb" in stack_lower` matched `gdbus`,
+            `gdbm_open`, `legacy_gdb_wrapper`. The crash got
+            tagged "debugger_or_sanitizer_artifact" and was
+            silently dropped from triage when in fact it was
+            a real bug in the gdbus binding.
+          * `"asan" in stack_lower` matched any function with
+            "asan" as substring.
+
+        False-negatives (real crashes mis-classified as
+        environmental) are particularly bad because the
+        finding then never reaches the operator's review
+        queue.
+        """
         info = {"environmental_crash": "false", "reason": ""}
-        
+
         # Check for SIGTRAP which could be debugger breakpoint
         if context.signal == "05":  # SIGTRAP
             # Look for debugger-related patterns in disassembly
             if context.disassembly:
                 disassembly_lower = context.disassembly.lower()
-                if "int3" in disassembly_lower or "breakpoint" in disassembly_lower:
+                if (
+                    re.search(r"\bint3\b", disassembly_lower)
+                    or re.search(r"\bbreakpoint\b", disassembly_lower)
+                ):
                     info["environmental_crash"] = "true"
                     info["reason"] = "debugger_breakpoint"
-                elif "trap" in disassembly_lower and "invalid" in disassembly_lower:
+                elif re.search(r"\btrap\b", disassembly_lower) \
+                        and re.search(r"\binvalid\b", disassembly_lower):
                     info["environmental_crash"] = "true"
                     info["reason"] = "invalid_trap_instruction"
-                    
-        # Check for crashes in debugger/library code
+
+        # Check for crashes in debugger/library code — word-boundary
+        # so `gdb` doesn't false-match `gdbus`, `gdbm_open`.
         if context.stack_trace:
             stack_lower = context.stack_trace.lower()
-            if any(lib in stack_lower for lib in ["gdb", "lldb", "valgrind", "asan", "ubsan"]):
+            lib_re = re.compile(r"\b(gdb|lldb|valgrind|asan|ubsan)\b")
+            if lib_re.search(stack_lower):
                 info["environmental_crash"] = "true"
                 info["reason"] = "debugger_or_sanitizer_artifact"
 
         # Check for sanitizer crashes only (NOT library functions like malloc/strcpy)
         # NOTE: Crashes in malloc/free/strcpy/memcpy are often EXPLOITABLE (heap overflow, UAF, etc.)
-        # and should NOT be marked as environmental
-        if context.function_name and any(sanitizer in context.function_name.lower() for sanitizer in [
-            "__asan", "__ubsan", "__lsan", "__tsan", "__msan", "__hwasan"
-        ]):
-            info["environmental_crash"] = "true"
-            info["reason"] = "sanitizer_artifact"
+        # and should NOT be marked as environmental.
+        # `__asan_*` family of internal symbols all start with `__`
+        # so `startswith("__asan")` is the canonical check (no
+        # ambiguity with substring matches inside other identifiers).
+        if context.function_name:
+            fn = context.function_name.lower()
+            if any(fn.startswith(sanitizer) for sanitizer in [
+                "__asan", "__ubsan", "__lsan", "__tsan", "__msan", "__hwasan",
+            ]):
+                info["environmental_crash"] = "true"
+                info["reason"] = "sanitizer_artifact"
 
         return info
 
@@ -1167,11 +1265,19 @@ class CrashAnalyser:
         functions = []
         for line in stack_trace.split('\n'):
             # Match GDB format: #N  0xADDR in function_name
-            match = re.search(r'in\s+([^\s(]+)', line)
+            # Word-boundary `\bin\b` so we don't match
+            # substring-`in` inside other tokens — pre-fix
+            # `'in\s+'` matched `inside_function`, `into`, and
+            # any literal text in string output containing
+            # `"in foo"`. The matched group then became part
+            # of the stack hash, polluting the dedup signal.
+            match = re.search(r'\bin\s+([^\s(]+)', line)
             if match:
                 functions.append(match.group(1))
             # Also match LLDB format: frame #N: 0xADDR function_name
-            elif 'frame' in line.lower():
+            # Word-boundary `frame` so we don't match `framework`,
+            # `iframe`, `frames` substring matches.
+            elif re.search(r'\bframe\b', line, re.IGNORECASE):
                 parts = line.split()
                 if len(parts) >= 3:
                     # Take the part after the address
@@ -1238,7 +1344,19 @@ class CrashAnalyser:
                 capture_output=True,
                 text=True,
                 timeout=30,
-                env={**os.environ, "ASAN_OPTIONS": "abort_on_error=0:print_stacktrace=1"},
+                # Use get_safe_env() as the base, NOT os.environ.
+                # Pre-fix `{**os.environ, "ASAN_OPTIONS": ...}`
+                # passed the operator's full env (LLM API keys,
+                # AWS_*, GH_TOKEN, RAPTOR_internal vars) through
+                # to the binary being analysed. The crash binary
+                # is by definition INTERESTING — it crashed under
+                # adversarial input — and may have a malicious
+                # input that exfiltrates getenv() results into
+                # the crash output, which we then write to the
+                # report. Same threat model as fuzzing/afl_runner
+                # batch 454.
+                env={**RaptorConfig.get_safe_env(),
+                     "ASAN_OPTIONS": "abort_on_error=0:print_stacktrace=1"},
             )
             
             # Combine stdout and stderr (ASan reports to stderr)

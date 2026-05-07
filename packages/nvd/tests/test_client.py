@@ -117,10 +117,29 @@ class TestRateLimitRetry:
 
 class TestApiKey:
     def test_api_key_env_sends_header(self, stub, monkeypatch) -> None:
-        monkeypatch.setenv("NVD_API_KEY", "test-key-123")
+        # batch 550 — NVD API keys must be UUID-format. The
+        # pre-fix test used `"test-key-123"` which is not a
+        # valid NVD key shape; client now rejects it (treats
+        # as no-key). Use a real UUID for the positive case.
+        monkeypatch.setenv(
+            "NVD_API_KEY", "12345678-1234-1234-1234-1234567890ab",
+        )
         stub.add(json=_cve_payload())
         NvdClient(cache_enabled=False).get_payload("CVE-2024-9999")
-        assert stub.calls[0]["headers"].get("apiKey") == "test-key-123"
+        assert (
+            stub.calls[0]["headers"].get("apiKey")
+            == "12345678-1234-1234-1234-1234567890ab"
+        )
+
+    def test_invalid_api_key_format_treated_as_no_key(self, stub, monkeypatch) -> None:
+        # batch 550 — placeholder / wrong-format keys
+        # (operator copy-paste error, "YOUR_KEY_HERE", non-
+        # UUID strings) are silently dropped rather than sent.
+        # Better than triggering 401/403 retry storms.
+        monkeypatch.setenv("NVD_API_KEY", "YOUR_KEY_HERE")
+        stub.add(json=_cve_payload())
+        NvdClient(cache_enabled=False).get_payload("CVE-2024-9997")
+        assert "apiKey" not in stub.calls[0]["headers"]
 
     def test_no_api_key_sends_no_header(self, stub) -> None:
         stub.add(json=_cve_payload())

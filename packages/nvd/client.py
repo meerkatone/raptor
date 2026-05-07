@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,6 +32,16 @@ DEFAULT_TIMEOUT_S = 30
 _CACHE_TTL = 86400 * 7  # 7 days
 _RETRY_MAX = 4
 _RETRY_BASE_S = 1.0
+
+# NVD API keys are RFC 4122 UUID strings — `xxxxxxxx-xxxx-
+# xxxx-xxxx-xxxxxxxxxxxx`. Used to validate operator-supplied
+# NVD_API_KEY before sending; placeholder strings like
+# `"YOUR_KEY_HERE"` get rejected at validation rather than
+# triggering 401/403 retry storms.
+_NVD_KEY_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+)
 
 _NVD_CACHE_MISSING: dict[str, str] = {"_sentinel": "nvd_missing"}
 
@@ -84,7 +95,20 @@ class NvdClient:
         return payload
 
     def _fetch_with_retry(self, cve_id: str) -> dict[str, Any] | None:
+        # API key validation. Pre-fix any non-empty NVD_API_KEY
+        # was sent verbatim — placeholders (`"must-set-this-please"`,
+        # `"YOUR_KEY_HERE"`, copy-paste with leading whitespace
+        # already stripped but trailing junk preserved) reached
+        # the server, were rejected with 401/403, and the
+        # operator saw "no NVD result" without knowing the key
+        # was malformed. NVD API keys are 36-char UUIDs
+        # (8-4-4-4-12 hex with hyphens). Reject obvious
+        # placeholders silently — empty header is better than
+        # invalid header (the latter triggers 403 retries that
+        # exhaust the budget).
         api_key = os.environ.get("NVD_API_KEY", "").strip()
+        if api_key and not _NVD_KEY_RE.match(api_key):
+            api_key = ""
         headers = {"apiKey": api_key} if api_key else {}
         url = f"{BASE_URL}?cveId={cve_id}"
         delay_s = _RETRY_BASE_S
@@ -106,8 +130,24 @@ class NvdClient:
                             time.sleep(wait_s)
                         delay_s *= 2
                         continue
+                # 5xx server errors are transient — retry like
+                # 429. Pre-fix only 429 was retried; 502/503/504
+                # gave up immediately, so a brief NVD outage
+                # caused the whole CVE-diff batch to fail when
+                # a 1-2 retry would have succeeded.
+                if 500 <= status < 600:
+                    if attempt < _RETRY_MAX:
+                        time.sleep(delay_s)
+                        delay_s *= 2
+                        continue
                 return None
             if resp.status != 200:
+                # 5xx on the response path (no exception raised
+                # but error status returned) — same retry rule.
+                if 500 <= resp.status < 600 and attempt < _RETRY_MAX:
+                    time.sleep(delay_s)
+                    delay_s *= 2
+                    continue
                 return None
             try:
                 return resp.json()

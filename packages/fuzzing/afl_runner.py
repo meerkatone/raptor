@@ -48,7 +48,28 @@ class AFLRunner:
             raise PermissionError(f"Binary is not executable: {binary_path}")
 
         self.corpus_dir = Path(corpus_dir) if corpus_dir else self._create_default_corpus()
-        self.output_dir = Path(output_dir) if output_dir else Path(f"out/fuzz_{self.binary.stem}")
+        # Anchor default output to RaptorConfig.get_out_dir() so
+        # fuzz output lands under the operator-configured run
+        # base, NOT a literal `out/` relative to whatever
+        # cwd the script happened to launch from. Pre-fix
+        # `Path(f"out/fuzz_{name}")` was relative to the current
+        # working directory at runner-construction time. Two
+        # failure modes:
+        #   * Operator running RAPTOR from `~/work/foo/` got
+        #     fuzz output in `~/work/foo/out/fuzz_*` instead of
+        #     the configured project run dir.
+        #   * Script invoked via cron / systemd / CI from `/`
+        #     wrote `/out/fuzz_*` (or failed with permission
+        #     denied), polluting the root filesystem.
+        # `RaptorConfig.get_out_dir()` resolves to the active
+        # project's run dir (or DEFAULT_OUTPUT_BASE when no
+        # project is active) per the standard run-lifecycle
+        # rule.
+        if output_dir:
+            self.output_dir = Path(output_dir)
+        else:
+            from core.config import RaptorConfig
+            self.output_dir = RaptorConfig.get_out_dir() / f"fuzz_{self.binary.stem}"
         self.dict_path = Path(dict_path) if dict_path else None
         self.input_mode = input_mode
         self.check_sanitizers = check_sanitizers
@@ -284,15 +305,58 @@ class AFLRunner:
             # to tolerate both: we lose a small amount of speed and the
             # guarantee that external cores are captured (AFL still writes its
             # own crash artefacts under crashes/).
-            afl_env = os.environ.copy()
+            # Use get_safe_env() as the base, NOT os.environ.copy().
+            # Pre-fix the AFL subprocess inherited the operator's
+            # FULL environment including any RAPTOR-internal vars
+            # (RAPTOR_*, ANTHROPIC_API_KEY, OPENAI_API_KEY,
+            # AWS_*, GH_TOKEN, etc.). AFL itself doesn't
+            # interpret most of those, but:
+            #   * The fuzzed binary inherits the same env. If the
+            #     target reads `getenv("AWS_*")` (boto SDK,
+            #     credentials chain) or shells out (passing env
+            #     to libc functions), the operator's
+            #     credentials reach attacker-controlled code in
+            #     the fuzz target.
+            #   * On crash, AFL writes the env to the crash
+            #     metadata in `crashes/`; reports / triage flows
+            #     that include those files leak credentials.
+            # `get_safe_env()` strips dangerous / sensitive
+            # variables (see core/config.py DANGEROUS_ENV_VARS,
+            # LLM_API_KEY_VARS) by default. AFL_* vars get
+            # added explicitly below.
+            from core.config import RaptorConfig
+            afl_env = RaptorConfig.get_safe_env()
             afl_env.setdefault("AFL_SKIP_CPUFREQ", "1")
             afl_env.setdefault("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES", "1")
 
             # Intentionally bare Popen — AFL fuzz daemon is long-running and
             # needs streaming output. Cannot use sandbox_run (blocks until exit).
+            #
+            # `stdout=DEVNULL` instead of `PIPE`. Pre-fix both
+            # streams went to PIPE buffers without ANY drainer
+            # thread consuming them while AFL ran. AFL's
+            # status-screen writes to stdout periodically; after
+            # roughly the OS-default 64KB pipe buffer filled, the
+            # next write blocked AFL waiting for a reader — the
+            # whole fuzzing daemon stalled silently with no
+            # error visible to the operator (process showed as
+            # alive but execs/sec dropped to 0). The stall could
+            # last hours before the operator noticed in the
+            # status dashboard.
+            #
+            # stdout=DEVNULL discards the (verbose, redundant
+            # with our own status capture) AFL output without
+            # buffer-fill risk. stderr stays PIPE because:
+            #  (1) it's much lower volume — AFL only writes to
+            #      stderr on startup errors and shutdown,
+            #  (2) the post-exit `proc.communicate(timeout=1)`
+            #      below collects it for diagnostic logging
+            #      (the shmget / SHM-config error messages
+            #      operators rely on for setup troubleshooting).
+            # 64KB stderr pre-exit is plenty for either case.
             proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
                 env=afl_env,
@@ -386,15 +450,32 @@ class AFLRunner:
                     break
 
         finally:
-            # Stop all AFL instances
+            # Stop all AFL instances. Use communicate(timeout=5)
+            # NOT wait(timeout=5) — pre-fix `proc.wait()` could
+            # deadlock indefinitely if AFL had buffered output in
+            # the stderr PIPE that no one had drained (stdout is
+            # DEVNULL post-batch-450; stderr is still PIPE for
+            # diagnostic capture). On SIGTERM AFL writes a
+            # shutdown banner + final stats to stderr — for
+            # campaigns that ran long enough to fill 64KB of
+            # stderr, wait() blocked forever waiting for the
+            # process to exit while the process blocked forever
+            # waiting for stderr-pipe space. communicate() drains
+            # the pipe and waits in a single thread-safe call.
             logger.info("Stopping AFL instances...")
             for name, proc in processes:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    proc.communicate(timeout=5)
                 except subprocess.TimeoutExpired:
                     logger.warning(f"Force killing {name}")
                     proc.kill()
+                    try:
+                        proc.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        # Kernel-level wedge — at this point we've
+                        # done what we can; orphan the proc.
+                        pass
 
         # Count final crashes
         total_crashes = 0

@@ -127,6 +127,26 @@ def run_rule(
     runner = subprocess_runner or subprocess.run
 
     start = time.monotonic()
+    # `cwd=target.parent if file else target if dir`. spatch
+    # resolves #include paths relative to its CWD when paths
+    # are not absolute. Pre-fix the runner inherited the
+    # parent process's CWD (typically the RAPTOR repo root,
+    # not the target's directory), so:
+    #   * Headers in the target's own tree found via relative
+    #     #include were missed (spatch couldn't resolve
+    #     `#include "foo.h"` because it looked in
+    #     RAPTOR-root not target-root).
+    #   * SmPL `<+...+>` patterns spanning multiple translation
+    #     units silently failed to match across includes.
+    # Setting cwd= to the target's directory fixes both — the
+    # path semantics now match what spatch expects when invoked
+    # by hand from the target repo.
+    if target.is_file():
+        spatch_cwd = target.parent
+    elif target.is_dir():
+        spatch_cwd = target
+    else:
+        spatch_cwd = None
     try:
         proc = runner(
             cmd,
@@ -135,11 +155,30 @@ def run_rule(
             timeout=timeout,
             env=run_env,
             input=effective_rule,
+            cwd=str(spatch_cwd) if spatch_cwd is not None else None,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # Capture partial output before giving up. spatch on
+        # large repos sometimes runs past the timeout AFTER
+        # producing partial results — pre-fix we threw away
+        # everything (returned only "Timeout" error). Now we
+        # parse whatever it managed to emit before the timeout
+        # so operators see those matches in the report
+        # alongside the timeout warning.
+        partial_stdout = exc.stdout if isinstance(exc.stdout, str) else (
+            exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""
+        )
+        partial_stderr = exc.stderr if isinstance(exc.stderr, str) else (
+            exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+        )
+        partial_matches = _dedup_matches(
+            _parse_results(partial_stdout, rule_name)
+            + _parse_results(partial_stderr, rule_name)
+        )
         return SpatchResult(
             rule=rule_name, rule_path=str(rule),
-            errors=[f"Timeout after {timeout}s"],
+            matches=partial_matches,
+            errors=[f"Timeout after {timeout}s (partial output captured)"],
             returncode=-1,
         )
     except OSError as e:
@@ -233,12 +272,24 @@ def _collect_files_examined(target: Path, match_files: set) -> List[str]:
 
     spatch has no machine-readable log of which files it processed, so we
     approximate: for a single file target we know exactly; for a directory
-    we enumerate *.c (spatch's default glob).
+    we enumerate *.c AND *.h (spatch examines headers too — pre-fix
+    only `.c` was counted, so the files_examined report under-
+    counted by ~50% on typical C projects, and any rule that
+    matched in a header silently failed to surface in
+    files_examined even though it WAS examined).
     """
     if target.is_file():
         examined = {str(target)} | match_files
     elif target.is_dir():
-        examined = {str(f) for f in target.rglob("*.c")} | match_files
+        # Both .c and .h — spatch examines preprocessed
+        # translation units which include headers via #include
+        # expansion. Operators tracking "did the rule examine
+        # this header?" need .h in the list.
+        examined = (
+            {str(f) for f in target.rglob("*.c")}
+            | {str(f) for f in target.rglob("*.h")}
+            | match_files
+        )
     else:
         examined = set(match_files)
     return sorted(examined)
@@ -262,10 +313,29 @@ def _inject_harness(rule_text: str, rule_name: str) -> str:
     pos_match = re.search(r"position\s+(\w+)", rule_text)
     pos_var = pos_match.group(1)
 
-    first_rule = re.search(r"@(\w+)@", rule_text)
-    if not first_rule:
+    # Detect multi-rule .cocci files. Pre-fix the harness only
+    # bound to the FIRST `@rule_name@` block, so:
+    #   * If the position variable was declared in a LATER
+    #     rule, spatch raised "unbound metavariable" for the
+    #     harness reference.
+    #   * If multiple rules each declared their own position
+    #     vars, only the first one's matches were captured;
+    #     the rest silently produced no COCCIRESULT output.
+    # `re.findall(r"@(\w+)@", rule_text)` finds all named rule
+    # headers. Multi-rule (>1 distinct name) returns the rule
+    # text unchanged — spatch still runs (just without our
+    # JSON harness), and the caller logs that structured
+    # output was unavailable for this rule file. Better than
+    # silently emitting partial / wrong data.
+    rule_names = re.findall(r"@(\w+)@", rule_text)
+    if len(set(rule_names)) > 1:
+        # Multi-rule file — harness injection isn't safe.
+        # Caller handles the no-output case via spatch's
+        # raw stdout.
         return rule_text
-    rule_id = first_rule.group(1)
+    if not rule_names:
+        return rule_text
+    rule_id = rule_names[0]
 
     safe_name = _SAFE_NAME_RE.sub("_", rule_name)
 
