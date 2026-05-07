@@ -353,6 +353,16 @@ class CodeQLAgent:
                 use_extended=use_extended
             )
 
+            # IRIS LocalFlowSource pass — runs the in-repo packs that
+            # complement stdlib coverage for CLI / env / stdin sources.
+            # Empty dict if no in-repo pack exists for any of the
+            # languages we built DBs for (e.g. cpp; stdlib already
+            # covers it). Standalone /codeql benefits from this without
+            # going via /agentic.
+            iris_results = self.query_runner.analyze_iris_packs(
+                successful_dbs, self.out_dir,
+            )
+
             # Collect SARIF files and count findings
             sarif_files = []
             total_findings = 0
@@ -365,6 +375,16 @@ class CodeQLAgent:
                 else:
                     logger.error(f"  - {lang}: Analysis failed")
                     errors.extend(result.errors)
+
+            for lang, result in iris_results.items():
+                if result.success and result.sarif_path:
+                    sarif_files.append(str(result.sarif_path))
+                    total_findings += result.findings_count
+                    if result.findings_count:
+                        logger.info(
+                            f"  - {lang} IRIS LocalFlowSource: "
+                            f"{result.findings_count} extra findings"
+                        )
 
             # PHASE 5: Generate Report
             logger.info(f"\n{'=' * 70}")

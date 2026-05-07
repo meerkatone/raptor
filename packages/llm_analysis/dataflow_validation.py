@@ -626,6 +626,89 @@ def _hypothesis_cache_key(h) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def tier1_check_finding(
+    finding: Dict,
+    codeql_dbs: Dict[str, Path],
+    *,
+    target_path: Optional[Path] = None,
+) -> str:
+    """Free Tier 1 dataflow check for a single finding — no LLM,
+    no Hypothesis context, no orchestration.
+
+    Used by consumers that want a cheap pre-flight check before
+    spending real money on downstream analysis (e.g. `/exploit`
+    deciding whether to ask an LLM to write a PoC). Reuses the
+    discovery + run_prebuilt_query path that the full IRIS validator
+    uses, but bypasses the eligibility filter, hypothesis builder,
+    cross-family resolver, and Tier 2/3 fallthrough.
+
+    Returns one of:
+      "confirmed"    — Tier 1 query found matches at the finding's
+                       location. The flow is real.
+      "refuted"      — query lives under EXTRA_CODEQL_PACK_ROOTS
+                       (broad LocalFlowSource model) and matches=0.
+                       The flow is genuinely absent — caller should
+                       skip downstream LLM cost.
+      "inconclusive" — query ran cleanly but the result didn't fit
+                       confirmed/refuted (matches elsewhere; or
+                       stdlib query with broad model returned 0
+                       matches, which doesn't justify refutation).
+      "no_check"     — the check could not run at all: finding has
+                       no usable language tag, no in-repo or stdlib
+                       query exists for (lang, CWE), no CodeQL DB
+                       was provided for the language, or codeql/the
+                       sandbox isn't available. Caller should treat
+                       this as "haven't checked" and proceed.
+
+    Cache reuse: the underlying `codeql database analyze` call
+    is cached by CodeQL (BQRS files keyed on query+DB), so calling
+    `tier1_check_finding` multiple times for the same (DB, query)
+    pair — including the orchestrator's later `validate_dataflow_claims`
+    pass — is essentially free after the first invocation.
+
+    Args:
+        finding: SARIF-derived finding dict. Reads `file_path`/`file`,
+            `language`/`languages`, `cwe_id`, `rule_id`.
+        codeql_dbs: Per-language CodeQL DB map, e.g.
+            `{"python": Path("/run/out/codeql/python-db")}`. Pass
+            `discover_codeql_databases(out_dir)` to get one.
+        target_path: Repo root for evidence audit-trail. Defaults to
+            the database path when not supplied.
+    """
+    language = _finding_language(finding)
+    if not language:
+        return "no_check"
+
+    cwe = (finding.get("cwe_id") or "").upper().strip()
+    if not cwe:
+        cwe = (infer_cwe_from_rule_id(finding.get("rule_id", "")) or "").upper().strip()
+    if not cwe:
+        return "no_check"
+
+    prebuilt_path = discover_prebuilt_query(language, cwe)
+    if prebuilt_path is None:
+        return "no_check"
+
+    db = codeql_dbs.get(language) or codeql_dbs.get("_default")
+    if db is None or not Path(db).exists():
+        return "no_check"
+
+    adapter = CodeQLAdapter(database_path=Path(db))
+    if not adapter.is_available():
+        return "no_check"
+
+    target = Path(target_path) if target_path is not None else Path(db)
+    try:
+        ev = adapter.run_prebuilt_query(prebuilt_path, target)
+    except Exception as e:
+        logger.debug("tier1_check_finding: adapter raised: %s", e)
+        return "no_check"
+
+    if not ev.success:
+        return "no_check"
+    return _verdict_from_prebuilt(ev, finding, prebuilt_path)
+
+
 def _validate_one_hypothesis(
     hypothesis: "Hypothesis",
     finding: Dict,

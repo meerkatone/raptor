@@ -720,10 +720,85 @@ class AutonomousSecurityAgentV2:
             vuln.exploitability_score = 0.5
             return False
 
+    def _tier1_pre_flight(self, vuln: VulnerabilityContext) -> str:
+        """Run IRIS Tier 1 against `vuln` if a CodeQL DB is available.
+
+        Returns one of "confirmed" / "refuted" / "inconclusive" /
+        "no_check". Refuted is the only verdict that gates exploit
+        generation — everything else proceeds. See
+        `dataflow_validation.tier1_check_finding` for the verdict
+        semantics.
+
+        Two paths to a verdict, in priority order:
+
+          1. Reuse `vuln.analysis['dataflow_validation']` if the
+             orchestrator already ran `validate_dataflow_claims` on
+             this finding. Avoids a second CodeQL invocation
+             (free-but-not-zero), and survives the case where the
+             CodeQL DB has been cleaned up between phases — the
+             cached verdict still tells us what to do.
+          2. Otherwise: discover DBs lazily from `<out_dir>/codeql/`
+             and call `tier1_check_finding`. If the codeql phase
+             didn't run for this target, the DB dict is empty and
+             the gate becomes a no-op.
+
+        The gate must never raise — any exception falls through to
+        "no_check" so a sandbox / discovery / config bug can't break
+        the exploit pipeline.
+        """
+        # Path 1: reuse orchestrator's earlier validation if present.
+        existing = (vuln.analysis or {}).get("dataflow_validation") or {}
+        verdict = existing.get("verdict")
+        if verdict in ("confirmed", "refuted", "inconclusive"):
+            return verdict
+
+        # Path 2: fresh Tier 1 check against the run's CodeQL DBs.
+        if getattr(self, "_codeql_dbs", None) is None:
+            try:
+                from packages.llm_analysis.dataflow_validation import (
+                    discover_codeql_databases,
+                )
+                self._codeql_dbs = discover_codeql_databases(self.out_dir) or {}
+            except Exception as e:
+                logger.debug("Tier 1 gate: DB discovery failed: %s", e)
+                self._codeql_dbs = {}
+        if not self._codeql_dbs:
+            return "no_check"
+        try:
+            from packages.llm_analysis.dataflow_validation import (
+                tier1_check_finding,
+            )
+            return tier1_check_finding(vuln.finding, self._codeql_dbs,
+                                       target_path=self.repo_path)
+        except Exception as e:
+            # The gate must never break the pipeline. Log and proceed.
+            logger.debug("Tier 1 gate: check raised: %s", e)
+            return "no_check"
+
     def generate_exploit(self, vuln: VulnerabilityContext) -> bool:
 
         if not vuln.exploitable:
             logger.debug(f"⊘ Skipping exploit generation (not exploitable)")
+            return False
+
+        # IRIS Tier 1 pre-flight gate — free CodeQL check before paying
+        # for LLM exploit generation. If discovery surfaces an in-repo
+        # LocalFlowSource query for the finding's (lang, CWE) and that
+        # query refutes the dataflow (zero matches under the broad
+        # source model), skip generation. Inconclusive / confirmed /
+        # no_check fall through and proceed as before.
+        gate = self._tier1_pre_flight(vuln)
+        if gate == "refuted":
+            logger.info(
+                f"⊘ Skipping exploit generation: IRIS Tier 1 refuted the "
+                f"dataflow claim for {vuln.rule_id} at "
+                f"{vuln.file_path}:{vuln.start_line}"
+            )
+            vuln.analysis = (vuln.analysis or {})
+            vuln.analysis["exploit_skipped_reason"] = (
+                "iris_tier1_refuted: Tier 1 LocalFlowSource query "
+                "found no path; no LLM tokens spent"
+            )
             return False
 
         logger.info("─" * 70)
