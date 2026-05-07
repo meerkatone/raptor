@@ -839,7 +839,20 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             # list collapsed both cases and the CC-flag-suggest
             # path silently skipped its retry attempt.
             if result.returncode != 0 and "Traceback" in result.stderr:
-                logger.warning(f"Build script crashed: {result.stderr.split(chr(10))[-2]}")
+                # `[-2]` reaches the second-to-last line, but
+                # `result.stderr.split("\n")[-2]` raises IndexError
+                # if stderr has fewer than 2 lines (e.g. the script
+                # crashed before printing anything, or printed a
+                # single line without a trailing newline). Pre-fix
+                # the IndexError aborted the warning emission AND
+                # dropped through to the bare `except Exception`
+                # below, returning [] (now None) but with the
+                # operator-visible cause swallowed. Defensive
+                # slicing: take the last non-empty line, or the
+                # whole stderr if there's only one line.
+                stderr_lines = [l for l in (result.stderr or "").split("\n") if l.strip()]
+                tail = stderr_lines[-1] if stderr_lines else "(no stderr)"
+                logger.warning(f"Build script crashed: {tail}")
                 return None
         except (subprocess.TimeoutExpired, Exception) as e:
             logger.warning("Build script never ran (%r) — treating as 'didn't run'", e)
