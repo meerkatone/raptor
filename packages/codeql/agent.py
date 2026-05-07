@@ -353,6 +353,16 @@ class CodeQLAgent:
                 use_extended=use_extended
             )
 
+            # IRIS LocalFlowSource pass — runs the in-repo packs that
+            # complement stdlib coverage for CLI / env / stdin sources.
+            # Empty dict if no in-repo pack exists for any of the
+            # languages we built DBs for (e.g. cpp; stdlib already
+            # covers it). Standalone /codeql benefits from this without
+            # going via /agentic.
+            iris_results = self.query_runner.analyze_iris_packs(
+                successful_dbs, self.out_dir,
+            )
+
             # Collect SARIF files and count findings
             sarif_files = []
             total_findings = 0
@@ -365,6 +375,16 @@ class CodeQLAgent:
                 else:
                     logger.error(f"  - {lang}: Analysis failed")
                     errors.extend(result.errors)
+
+            for lang, result in iris_results.items():
+                if result.success and result.sarif_path:
+                    sarif_files.append(str(result.sarif_path))
+                    total_findings += result.findings_count
+                    if result.findings_count:
+                        logger.info(
+                            f"  - {lang} IRIS LocalFlowSource: "
+                            f"{result.findings_count} extra findings"
+                        )
 
             # PHASE 5: Generate Report
             logger.info(f"\n{'=' * 70}")
@@ -588,6 +608,12 @@ Examples:
     parser.add_argument("--out", help="Output directory (auto-generated if not specified)")
     parser.add_argument("--min-files", type=int, default=3, help="Minimum files to detect language")
     parser.add_argument("--codeql-cli", help="Path to CodeQL CLI (auto-detected if not specified)")
+    parser.add_argument(
+        "--no-iris-tier1", action="store_true",
+        help="Skip the IRIS Tier 1 in-repo LocalFlowSource pack analysis. "
+             "Use when the in-repo packs produce noise on a specific target "
+             "or when comparing stdlib-only vs LocalFlowSource verdicts.",
+    )
 
     # Sandbox CLI flags (--sandbox / --no-sandbox / --audit / --audit-verbose)
     # so the agentic-driven invocation can propagate audit mode into this
@@ -598,6 +624,13 @@ Examples:
 
     args = parser.parse_args()
     apply_cli_args(args, parser=parser)
+
+    # Flip the IRIS Tier 1 master switch for this invocation. The
+    # config is process-scoped so /codeql subprocesses don't bleed
+    # into other consumers. Reset is implicit (process exit).
+    if args.no_iris_tier1:
+        from core.config import RaptorConfig
+        RaptorConfig.IRIS_TIER1_ENABLED = False
 
     # Parse languages
     languages = None

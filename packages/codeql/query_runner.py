@@ -48,6 +48,42 @@ _PACK_NOT_FOUND_RE = re.compile(
 )
 
 
+def _iris_pack_deps_already_resolved(pack_dir: Path) -> bool:
+    """True when every dep pinned in `pack_dir/codeql-pack.lock.yml`
+    exists at its pinned version under `~/.codeql/packages/`.
+
+    Used by `analyze_iris_packs` to skip the network-permitted
+    `codeql pack install` call when the dep cache is already warm —
+    avoids both the subprocess and the sandbox network round-trip on
+    every IRIS analysis. Common case in normal RAPTOR setups (where
+    the user already has `codeql/<lang>-all` cached from prior
+    /codeql or /agentic runs).
+
+    Returns False (i.e. defer to full install) on any parse error,
+    missing lockfile, or missing dep — never raises.
+    """
+    lock = pack_dir / "codeql-pack.lock.yml"
+    if not lock.is_file():
+        return False
+    try:
+        import yaml  # transitively available via codeql packs
+    except ImportError:
+        return False
+    try:
+        data = yaml.safe_load(lock.read_text()) or {}
+    except Exception:
+        return False
+    deps = (data.get("dependencies") or {})
+    if not deps:
+        return False
+    cache = Path.home() / ".codeql" / "packages"
+    for dep_name, info in deps.items():
+        version = (info or {}).get("version")
+        if not version or not (cache / dep_name / version).is_dir():
+            return False
+    return True
+
+
 def _extract_missing_pack(stderr: str) -> str | None:
     """Extract the missing pack name from a CodeQL 'cannot be found' error.
 
@@ -599,6 +635,189 @@ class QueryRunner:
                     )
 
         return results
+
+    def analyze_iris_packs(
+        self,
+        databases: Dict[str, Path],
+        out_dir: Path,
+        max_workers: Optional[int] = None,
+    ) -> Dict[str, "QueryResult"]:
+        """Run RAPTOR's in-repo IRIS LocalFlowSource packs against each
+        database. Same DBs the standard suite uses; complementary
+        queries that catch CLI / env / stdin source flows the stdlib
+        `RemoteFlowSource`-based queries miss.
+
+        Standalone consumers: `/codeql` calls this after the standard
+        suite so operators running CodeQL outside `/agentic` get
+        LocalFlowSource coverage too. The pack lives at
+        `packages/llm_analysis/codeql_packs/<lang>-queries/`; lockfile
+        is committed, so `codeql pack install` is a fast idempotent
+        no-op on subsequent runs.
+
+        Returns one `QueryResult` per language whose pack exists. Langs
+        without an in-repo pack (e.g. cpp — stdlib already covers it
+        via parent `FlowSource`) are silently skipped.
+
+        Per-language analyses run in parallel via the same
+        ThreadPoolExecutor pattern `analyze_all_databases` uses.
+
+        Caveat: first install on a fresh checkout needs network to
+        fetch dependency packs (codeql/<lang>-all etc.). Subsequent
+        runs are offline-cacheable via the committed lockfile. CI
+        environments without egress should pre-warm the dep cache;
+        otherwise IRIS analyses surface a `success=False` QueryResult
+        with the resolution error captured in `errors`.
+        """
+        from core.config import RaptorConfig
+
+        # Master kill-switch — operators can disable IRIS Tier 1
+        # globally via `RaptorConfig.IRIS_TIER1_ENABLED = False`. /codeql
+        # CLI's `--no-iris-tier1` flag flips this for a single invocation.
+        if not RaptorConfig.IRIS_TIER1_ENABLED:
+            logger.info("IRIS pack analysis skipped: IRIS_TIER1_ENABLED is False")
+            return {}
+
+        extras = list(RaptorConfig.EXTRA_CODEQL_PACK_ROOTS or [])
+        if not extras:
+            return {}
+        # First entry is the canonical RAPTOR-shipped pack root.
+        pack_root = extras[0]
+        if not pack_root.is_dir():
+            return {}
+
+        # Filter to languages that actually have an in-repo pack.
+        analyzable: Dict[str, Tuple[Path, Path]] = {}
+        for lang, db in databases.items():
+            pack_dir = pack_root / f"{lang}-queries"
+            if pack_dir.is_dir():
+                analyzable[lang] = (db, pack_dir)
+        if not analyzable:
+            return {}
+
+        max_workers = max_workers or RaptorConfig.MAX_CODEQL_WORKERS
+        results: Dict[str, "QueryResult"] = {}
+
+        def _run_one(lang: str, db: Path, pack_dir: Path) -> "QueryResult":
+            return self._run_iris_pack(lang, db, pack_dir, out_dir)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_lang = {
+                executor.submit(_run_one, lang, db, pack_dir): lang
+                for lang, (db, pack_dir) in analyzable.items()
+            }
+            for future in as_completed(future_to_lang):
+                lang = future_to_lang[future]
+                try:
+                    results[lang] = future.result()
+                except Exception as e:
+                    logger.warning(f"IRIS LocalFlowSource ({lang}) raised: {e}")
+                    db, _ = analyzable[lang]
+                    results[lang] = QueryResult(
+                        success=False, language=lang,
+                        database_path=db, sarif_path=None, findings_count=0,
+                        duration_seconds=0.0, errors=[str(e)],
+                        suite_name="raptor-iris-local",
+                    )
+        return results
+
+    def _run_iris_pack(
+        self, lang: str, db: Path, pack_dir: Path, out_dir: Path,
+    ) -> "QueryResult":
+        """Per-language worker for `analyze_iris_packs` — pack install
+        followed by analyze. Extracted so the parallel orchestrator
+        above is just dispatch + result aggregation."""
+        from core.config import RaptorConfig
+        from core.sandbox import run as sandbox_run
+
+        # Skip the install entirely when every dep pinned in the
+        # in-repo lockfile is already present in the standard pack
+        # cache. In normal RAPTOR setups (where `~/.codeql/packages/
+        # codeql/<lang>-all/...` is populated by the user's existing
+        # CodeQL install) this is the common case, and skipping
+        # avoids both the subprocess and the sandbox network-permit
+        # round-trip. Sandboxed CI environments without a populated
+        # pack cache fall through to the install attempt as before.
+        if _iris_pack_deps_already_resolved(pack_dir):
+            logger.debug(
+                f"IRIS pack ({lang}): deps satisfied from pack cache, skipping install"
+            )
+        else:
+            # Lazy `codeql pack install` — populates dependency cache
+            # from the committed lockfile. Idempotent and fast on
+            # subsequent runs; needed once on fresh checkouts before
+            # the in-repo queries can resolve their imports.
+            try:
+                install_proc = sandbox_run(
+                    [self.codeql_cli, "pack", "install", str(pack_dir)],
+                    block_network=False,  # may need to fetch dep packs first time
+                    tool_paths=self._sandbox_tool_paths(),
+                    audit_run_dir=str(out_dir),
+                    capture_output=True, text=True,
+                    timeout=180,
+                )
+                if install_proc.returncode != 0:
+                    # Surface install failure at warning level so
+                    # operators see *why* a subsequent analyze
+                    # failure is happening. Common failure mode:
+                    # sandboxed CI without network on a fresh
+                    # checkout (lockfile committed but dep packs not
+                    # cached locally).
+                    install_err = (
+                        install_proc.stderr or install_proc.stdout or ""
+                    ).strip()[:300]
+                    logger.warning(
+                        f"IRIS pack install ({lang}) returned "
+                        f"{install_proc.returncode}: {install_err}"
+                    )
+            except Exception as e:
+                logger.warning(f"IRIS pack install ({lang}) raised: {e}")
+
+        sarif_path = out_dir / f"codeql_{lang}_iris.sarif"
+        cmd = [
+            self.codeql_cli, "database", "analyze",
+            str(db), str(pack_dir),
+            "--format=sarif-latest",
+            f"--output={sarif_path}",
+            f"--threads={RaptorConfig.CODEQL_THREADS}",
+        ]
+        analysis_start = time.time()
+        try:
+            proc = sandbox_run(
+                cmd, block_network=True,
+                tool_paths=self._sandbox_tool_paths(),
+                audit_run_dir=str(out_dir),
+                capture_output=True, text=True,
+                timeout=RaptorConfig.CODEQL_ANALYZE_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning(f"IRIS LocalFlowSource ({lang}) analyze raised: {e}")
+            return QueryResult(
+                success=False, language=lang,
+                database_path=db, sarif_path=None, findings_count=0,
+                duration_seconds=time.time() - analysis_start,
+                errors=[str(e)], suite_name="raptor-iris-local",
+            )
+
+        if proc.returncode == 0 and sarif_path.exists():
+            n = self._count_sarif_findings(sarif_path)
+            logger.info(f"✓ IRIS LocalFlowSource ({lang}): {n} findings")
+            return QueryResult(
+                success=True, language=lang,
+                database_path=db, sarif_path=sarif_path,
+                findings_count=n,
+                duration_seconds=time.time() - analysis_start,
+                errors=[], suite_name="raptor-iris-local",
+            )
+
+        err = (proc.stderr or proc.stdout or "").strip()[:300]
+        logger.warning(f"IRIS LocalFlowSource ({lang}) failed: {err}")
+        return QueryResult(
+            success=False, language=lang,
+            database_path=db, sarif_path=None, findings_count=0,
+            duration_seconds=time.time() - analysis_start,
+            errors=[err] if err else [],
+            suite_name="raptor-iris-local",
+        )
 
     def _count_sarif_findings(self, sarif_path: Path) -> int:
         """Count findings in SARIF file."""
