@@ -68,7 +68,28 @@ else
 fi
 [ -z "$FILE_PATH" ] && exit 0
 
-# Skip non-source files
+# Skip non-source files. Pre-fix the extension check fired on
+# `${FILE_PATH##*.}` which strips through the LAST `.` — but if
+# the path has no `.`, the result is the WHOLE path, which
+# obviously doesn't match any extension and we exit 0. That's
+# fine for files. But for DIRECTORIES (paths with no extension):
+# the same logic skips them, which is the right outcome for
+# coverage tracking (we record file reads, not dir lists).
+#
+# What's NOT fine: the `${FILE_PATH##*.}` extension check matches
+# directory paths whose final component HAS a `.` (e.g.
+# `/repo/some.dir/`). Those falsely pass the extension filter
+# (last component after final `.` matches `dir`, which doesn't
+# match the case arm — fine for `dir`, but `/repo/foo.py/`
+# matches `py` and the dir would get appended as if it were a
+# read of a file). Coverage records then carry directory paths
+# which downstream fail to look up as files.
+#
+# Add an explicit `[ -d ]` filter so directories are rejected
+# regardless of trailing-component shape.
+if [ -d "$FILE_PATH" ]; then
+    exit 0
+fi
 case "${FILE_PATH##*.}" in
     py|js|ts|jsx|tsx|c|h|cpp|hpp|cc|cxx|java|go|rs|rb|php|cs|swift|kt|scala|sh) ;;
     *) exit 0 ;;
