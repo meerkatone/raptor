@@ -1431,36 +1431,60 @@ class CrashAnalyser:
         return False
 
     def _run_asan_analysis(self, input_file: Path) -> str:
-        """Run ASan-instrumented binary to get detailed crash diagnostics."""
+        """Run ASan-instrumented binary to get detailed crash diagnostics.
+
+        Input is fed via STDIN, not as an argv path. Pre-fix the
+        invocation was `[binary, str(input_file)]`, passing the
+        file path as the first argv. Two failure modes:
+
+        * Binaries that read from stdin (the common shape for
+          fuzz harnesses, AFL++ targets, and CTF-style crash
+          repros) ignored the path argv entirely — ASan ran on
+          a no-input invocation, produced no crash, and the
+          analyser concluded the binary was healthy when it
+          wasn't.
+        * Binaries that DO accept a path on argv but treat it
+          as their config / input-list / something OTHER than
+          "the data to crash on" produced wrong-shape behaviour
+          when handed a raw crash blob path (e.g. `--config
+          file.cfg` syntax misread as the cfg path).
+
+        The crash-analyser flow's source-of-truth invocation is
+        the GDB debugger.py path which already feeds input via
+        stdin (cluster 720 batch). Mirror that convention here
+        so ASAN sees the same shape the debugger does.
+        """
         logger.info("Running ASan analysis for enhanced diagnostics")
-        
+
         try:
-            # Run the binary with the crash input — full sandbox. ASAN's
-            # own diagnostics don't need ptrace, so the default `full`
-            # profile (seccomp incl. ptrace block, Landlock, net block)
-            # is appropriate.
+            # Run the binary with the crash input on stdin — full
+            # sandbox. ASAN's own diagnostics don't need ptrace, so
+            # the default `full` profile (seccomp incl. ptrace
+            # block, Landlock, net block) is appropriate.
             binary_dir = str(self.binary.parent.resolve())
-            result = _sandbox_run(
-                [str(self.binary), str(input_file)],
-                block_network=True,
-                target=binary_dir, output=binary_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                # Use get_safe_env() as the base, NOT os.environ.
-                # Pre-fix `{**os.environ, "ASAN_OPTIONS": ...}`
-                # passed the operator's full env (LLM API keys,
-                # AWS_*, GH_TOKEN, RAPTOR_internal vars) through
-                # to the binary being analysed. The crash binary
-                # is by definition INTERESTING — it crashed under
-                # adversarial input — and may have a malicious
-                # input that exfiltrates getenv() results into
-                # the crash output, which we then write to the
-                # report. Same threat model as fuzzing/afl_runner
-                # batch 454.
-                env={**RaptorConfig.get_safe_env(),
-                     "ASAN_OPTIONS": "abort_on_error=0:print_stacktrace=1"},
-            )
+            with open(input_file, "rb") as fh_in:
+                result = _sandbox_run(
+                    [str(self.binary)],
+                    stdin=fh_in,
+                    block_network=True,
+                    target=binary_dir, output=binary_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    # Use get_safe_env() as the base, NOT os.environ.
+                    # Pre-fix `{**os.environ, "ASAN_OPTIONS": ...}`
+                    # passed the operator's full env (LLM API keys,
+                    # AWS_*, GH_TOKEN, RAPTOR_internal vars) through
+                    # to the binary being analysed. The crash binary
+                    # is by definition INTERESTING — it crashed under
+                    # adversarial input — and may have a malicious
+                    # input that exfiltrates getenv() results into
+                    # the crash output, which we then write to the
+                    # report. Same threat model as fuzzing/afl_runner
+                    # batch 454.
+                    env={**RaptorConfig.get_safe_env(),
+                         "ASAN_OPTIONS": "abort_on_error=0:print_stacktrace=1"},
+                )
             
             # Combine stdout and stderr (ASan reports to stderr)
             asan_output = result.stdout + "\n" + result.stderr
