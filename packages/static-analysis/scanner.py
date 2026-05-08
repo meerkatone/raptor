@@ -195,7 +195,27 @@ def run_single_semgrep(
         Tuple of (sarif_path, success)
     """
     def sanitize_name(name: str) -> str:
-        return name.replace("/", "_").replace(":", "_")
+        # Strict allowlist: alphanumeric + dash + underscore +
+        # dot. Pre-fix only `/` and `:` were replaced — but
+        # `name` is the policy-pack name from
+        # `RaptorConfig.BASELINE_SEMGREP_PACKS` /
+        # `POLICY_GROUP_TO_SEMGREP_PACK` (operator can extend
+        # via `--policy-groups`), and the sanitised result
+        # becomes part of an output FILE PATH. Any other shell
+        # / filesystem-special character (`*`, `?`, `[`, `]`,
+        # `\\`, space, NUL, newline, control bytes) flowed
+        # straight into `out_dir / f"semgrep_{suffix}.sarif"`.
+        # Concrete failure: a custom policy pack named with a
+        # space (e.g. `--policy-groups "my pack"`) produced
+        # `semgrep_my pack.sarif` — a path with embedded
+        # whitespace that subsequent `find` / `glob` calls
+        # mishandled (split on whitespace, missing the second
+        # half).
+        import re as _re
+        # Replace any non-allowed char with underscore. Preserve
+        # the legacy `/` → `_` and `:` → `_` mapping (those are
+        # both in the disallowed set, so they get replaced anyway).
+        return _re.sub(r'[^A-Za-z0-9._-]', '_', name)
 
     suffix = sanitize_name(name)
     sarif = out_dir / f"semgrep_{suffix}.sarif"
