@@ -679,10 +679,37 @@ def _discover_executables(target):
                 ["find", target, "-type", "f", "-perm", "+111"],
                 capture_output=True, text=True, timeout=30
             )
+        # Track collisions on stem. Pre-fix `result[p.stem] = str(p)`
+        # silently OVERWROTE earlier entries when two binaries
+        # shared a stem (e.g. `bin/foo` and `lib/foo`, or
+        # `build/release/test` and `build/debug/test` — common
+        # in projects with multi-target builds). Whichever path
+        # `find` returned LAST won; the other was dropped without
+        # a log line. Operator's Stage E then mapped findings to
+        # the wrong binary (e.g. release-build binary chosen
+        # when the finding came from the debug-build's source).
+        # Build a per-stem LIST so the caller can choose
+        # (currently picks the first, but the data structure
+        # supports an explicit selector / log when multiple).
+        seen_stems: dict[str, list[str]] = {}
         for line in proc.stdout.strip().split("\n"):
             if line:
                 p = Path(line)
-                result[p.stem] = str(p)
+                seen_stems.setdefault(p.stem, []).append(str(p))
+        for stem, paths in seen_stems.items():
+            if len(paths) > 1:
+                # Log the collision so operator sees they have
+                # multiple build outputs with the same stem.
+                # Pick the SHORTEST path — heuristic for "most
+                # canonical" (build/release/test < build/debug/test
+                # only when sorted lexically; shortest works for
+                # `bin/foo` < `tools/_aux/foo`).
+                paths.sort(key=lambda s: (len(s), s))
+                print(
+                    f"WARNING: multiple executables named {stem!r}: "
+                    f"{paths!r} — picking {paths[0]!r}",
+                )
+            result[stem] = paths[0]
     except Exception:
         pass
     return result
