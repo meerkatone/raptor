@@ -64,8 +64,19 @@ esac
 FILE_PATH=$(realpath "$FILE_PATH" 2>/dev/null) || exit 0
 if [ -n "$PROJECT_TARGET" ]; then
     PROJECT_TARGET=$(realpath "$PROJECT_TARGET" 2>/dev/null) || exit 0
+    # Path-separator-anchored prefix match. Pre-fix the bare
+    # `"$PROJECT_TARGET"*` glob matched any path starting with the
+    # target STRING — so:
+    #   PROJECT_TARGET=/home/user/foo
+    #   FILE_PATH=/home/user/foobar/x.py
+    # matched the prefix "/home/user/foo" even though `foobar/` is
+    # a sibling, not a child. Reads under sibling-named projects
+    # were silently attributed to the active project's coverage,
+    # inflating its read counts and polluting the active manifest.
+    # Match either an exact-equal target dir OR target dir + `/`.
     case "$FILE_PATH" in
-        "$PROJECT_TARGET"*) ;;
+        "$PROJECT_TARGET") ;;
+        "$PROJECT_TARGET"/*) ;;
         *) exit 0 ;;
     esac
 fi
