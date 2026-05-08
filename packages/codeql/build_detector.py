@@ -537,7 +537,31 @@ class BuildDetector:
 
         Returns None for unsupported languages or no source files.
         """
-        if language not in self.COMPILED_LANGUAGES or language not in ("cpp", "java"):
+        # Pre-fix:
+        #   if language not in self.COMPILED_LANGUAGES or language not in ("cpp", "java"):
+        #       return None
+        # COMPILED_LANGUAGES contains 5 entries (cpp, java,
+        # csharp, swift, rust), but the second `or` clause
+        # narrows the gate to ("cpp", "java"). With `or`, the
+        # condition is True (and we return None) whenever EITHER
+        # check trips — and the ("cpp", "java") tuple is strictly
+        # narrower than COMPILED_LANGUAGES, so the first check
+        # never independently rejects anything the second check
+        # accepts. The COMPILED_LANGUAGES test is dead.
+        #
+        # Worse, the dead check misleads readers: it suggests
+        # synthesise_build_command supports the full
+        # COMPILED_LANGUAGES set when in fact it gates on the
+        # narrow 2-language tuple. The synthesiser body assumes
+        # cpp/java only (compiler detection in
+        # _detect_build_params, .java vs .cpp source-file
+        # filtering); enabling csharp/swift/rust here would just
+        # produce empty source_files and return None one branch
+        # later — but the misleading first check made it look
+        # like the function had broader scope.
+        #
+        # Replace with the single, honest gate.
+        if language not in ("cpp", "java"):
             return None
 
         source_files, compiler, include_flags, define_flags = self._detect_build_params(language)
