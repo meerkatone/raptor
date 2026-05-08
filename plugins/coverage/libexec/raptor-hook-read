@@ -7,6 +7,25 @@
 # appends the file path to the run's reads manifest.
 #
 
+# `set -euo pipefail` — pre-fix the script ran without strict
+# mode, so:
+#   * `set -e`: a failing command in the middle (e.g. `realpath`
+#     returning nothing for a deleted file mid-resolve, mktemp
+#     failing under disk pressure) silently continued, often
+#     writing partial / corrupted manifest entries.
+#   * `set -u`: typos in variable names (e.g. `$RUNDIR` vs
+#     `$RUN_DIR`) silently expanded to empty, producing manifest
+#     paths like `/tmp/.reads-manifest` (the `/` came from a bare
+#     empty interpolation) — pollution at a path the operator
+#     didn't own.
+#   * `set -o pipefail`: failing pipe stages (e.g. `jq` rejecting
+#     malformed input but `$()` still succeeding because the tail
+#     command exited 0) hid parse errors, producing empty
+#     PROJECT_DIR / PROJECT_TARGET that bypassed the prefix check.
+# All three protections are appropriate for an async hook where
+# silent partial success is worse than a clean exit.
+set -euo pipefail
+
 umask 077
 
 # Find active project
@@ -81,5 +100,31 @@ if [ -n "$PROJECT_TARGET" ]; then
     esac
 fi
 
-# Append to manifest
-echo "$FILE_PATH" >> "${RUN_DIR}.reads-manifest"
+# Append to manifest under flock so concurrent hook fires don't
+# interleave their writes mid-line.
+#
+# The hook is registered as PostToolUse on Read, which Claude
+# Code can fire concurrently from multiple worker threads
+# (parallel agentic tool dispatch, batch_tool_use). Pre-fix bare
+# `>>` was atomic per-write up to PIPE_BUF (4096 bytes on Linux)
+# — a single short path is fine, but two appends from two threads
+# on the same file at the same instant could interleave their
+# data in the kernel pipe buffer for buffered IO chains, leaving
+# manifest entries like `/path/A/path/B\n\n` (the second's
+# leading content stuck onto the first's trailing newline).
+# Downstream coverage parsing then saw a nonexistent path
+# `/path/A/path/B` and lost both real reads.
+#
+# `flock -x` on the manifest path serialises the appends. The
+# fd-3 redirect keeps the lock fd open across the inner echo
+# while flock holds the lock; closing fd 3 on exit releases
+# the lock implicitly when the script ends. 5s timeout because
+# the hook runs async and shouldn't block tool dispatch — if
+# 5s isn't enough to acquire the lock there's something seriously
+# wrong with the hook concurrency.
+manifest="${RUN_DIR}.reads-manifest"
+exec 3>>"$manifest"
+if flock -w 5 -x 3; then
+    echo "$FILE_PATH" >&3
+fi
+exec 3>&-
