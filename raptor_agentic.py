@@ -742,6 +742,7 @@ Examples:
         )
 
     # ---- Collect Semgrep results ----
+    semgrep_timed_out = False
     if semgrep_proc:
         try:
             semgrep_stdout, semgrep_stderr = semgrep_proc.communicate(timeout=1800)
@@ -750,8 +751,29 @@ Examples:
             semgrep_proc.kill()
             semgrep_proc.communicate()
             rc = -1
+            semgrep_timed_out = True
             print("❌ Semgrep scan timed out (30m)")
             logger.error("Semgrep scan timed out")
+            # Surface the timeout in the agentic-run summary even when
+            # CodeQL also runs. Pre-fix the `if not run_codeql:
+            # sys.exit(1)` asymmetry made the timeout LOUDLY fail
+            # Semgrep-only runs but SILENTLY continue mixed runs —
+            # operator scrolling past the error mid-run could miss
+            # it and ship a "scan complete" report that was actually
+            # missing all Semgrep findings. Write a marker file so
+            # downstream consumers (project merge, /project status,
+            # final summary) see an unambiguous "Semgrep timed out"
+            # signal instead of just absent semgrep_*.json files
+            # (which look indistinguishable from "scan was disabled").
+            try:
+                from core.json import save_json as _save_json
+                _save_json(
+                    Path(args.out) / ".semgrep_timeout" if args.out
+                    else RaptorConfig.get_out_dir() / ".semgrep_timeout",
+                    {"timed_out_at_seconds": 1800, "stage": "semgrep"},
+                )
+            except Exception:
+                pass
             if not run_codeql:
                 sys.exit(1)
 
