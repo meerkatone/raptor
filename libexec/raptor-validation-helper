@@ -646,7 +646,23 @@ def prepare_D(workdir, target=None):
 # ---------------------------------------------------------------------------
 
 def _discover_executables(target):
-    """Find executable files in target directory. Returns {stem: path}."""
+    """Find executable files in target directory. Returns {stem: path}.
+
+    Pre-fix used `find -executable` which is a GNU find extension.
+    On BSD find (macOS, FreeBSD), `-executable` is unrecognised
+    and the find call exits non-zero with empty stdout — Stage E
+    on macOS got an empty executables map and silently failed
+    to map findings to binaries.
+
+    Fall back to `-perm +111` (BSD-compatible) when GNU
+    `-executable` isn't supported. The two predicates aren't
+    semantically identical (`-executable` checks effective
+    permissions for the running user; `-perm +111` matches any
+    executable bit), but for the "discover binaries to validate"
+    use case both are correct: a binary with execute bits set
+    by SOMEONE is a candidate; we'll fail-loud later if we
+    can't actually exec it.
+    """
     import subprocess as _sp
     result = {}
     try:
@@ -654,6 +670,15 @@ def _discover_executables(target):
             ["find", target, "-executable", "-type", "f"],
             capture_output=True, text=True, timeout=30
         )
+        # GNU find returns rc=0 on success; BSD find with
+        # `-executable` errors out (rc!=0, stderr "find: -executable:
+        # unknown primary or operator"). Detect the BSD case and
+        # retry with the portable `-perm +111` predicate.
+        if proc.returncode != 0 or "unknown primary" in (proc.stderr or "").lower():
+            proc = _sp.run(
+                ["find", target, "-type", "f", "-perm", "+111"],
+                capture_output=True, text=True, timeout=30
+            )
         for line in proc.stdout.strip().split("\n"):
             if line:
                 p = Path(line)
