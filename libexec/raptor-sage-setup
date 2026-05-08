@@ -74,12 +74,46 @@ EOF
 }
 
 MODE=install
+MODE_EXPLICIT=0
+# Pre-fix the parser only knew `--uninstall` (default install).
+# Two ambiguities operators hit:
+#
+# 1. Conflicting modes silently last-wins. Pre-fix
+#    `--install --uninstall` (operator typo or paste from
+#    a script that builds the argv) silently took the
+#    LAST mode flag, with no warning. Now: explicit
+#    flags conflict-detected; second mode flag errors.
+# 2. No symmetric `--install` flag. Operators following
+#    the README's "explicit is better" convention typed
+#    `--install` and got "unknown argument" — even
+#    though `--install` is exactly what the script does
+#    by default. Accept it for symmetry with `--uninstall`.
+# 3. No subcommand-style positional form. Operators used
+#    to `git fetch` / `docker pull` reach for
+#    `raptor-sage-setup install` / `raptor-sage-setup
+#    uninstall` and got "unknown argument". Accept the
+#    bare-word forms so the operator-facing surface is
+#    permissive without sacrificing the explicit-flag
+#    error path.
 for arg in "$@"; do
     case "$arg" in
-        --uninstall)
-            MODE=uninstall
+        --install|install)
+            if [ "$MODE_EXPLICIT" = "1" ] && [ "$MODE" != "install" ]; then
+                echo "raptor-sage-setup: conflicting modes: $arg vs --uninstall" >&2
+                exit 2
+            fi
+            MODE=install
+            MODE_EXPLICIT=1
             ;;
-        -h|--help)
+        --uninstall|uninstall)
+            if [ "$MODE_EXPLICIT" = "1" ] && [ "$MODE" != "uninstall" ]; then
+                echo "raptor-sage-setup: conflicting modes: $arg vs --install" >&2
+                exit 2
+            fi
+            MODE=uninstall
+            MODE_EXPLICIT=1
+            ;;
+        -h|--help|help)
             usage
             ;;
         *)
