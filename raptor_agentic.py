@@ -150,9 +150,16 @@ def run_command_streaming(cmd: list, description: str) -> tuple[int, str, str]:
         # Wait for process to complete
         process.wait(timeout=1800)  # 30 minutes
 
-        # Wait for all output to be read
-        stdout_thread.join()
-        stderr_thread.join()
+        # Wait for all output to be read.
+        # Bounded join: pre-fix `.join()` (no timeout) hung forever
+        # if the reader thread blocked on a stuck pipe (process is
+        # gone but the OS pipe-buffer drain isn't progressing — rare
+        # with subprocess.PIPE + .wait() done first, but seen on
+        # macOS with zombie children that keep the pipe FD alive).
+        # 5s is plenty after process.wait() returned — by then the
+        # OS has flushed everything that's coming.
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
 
         stdout = ''.join(stdout_lines)
         stderr = ''.join(stderr_lines)
@@ -161,7 +168,24 @@ def run_command_streaming(cmd: list, description: str) -> tuple[int, str, str]:
 
     except subprocess.TimeoutExpired:
         logger.error(f"Command timed out: {description}")
+        # Reap properly: kill THEN wait. Pre-fix `process.kill()`
+        # alone left the child as a zombie until the OS reaped it
+        # via SIGCHLD (or until our parent process exited),
+        # potentially holding open pipe FDs and sandbox resources.
+        # The follow-up `wait(timeout=5)` collects the exit status
+        # and frees the kernel slot.
         process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"Process {process.pid} did not exit within 5s of SIGKILL — "
+                f"leaving as zombie (OS will reap on parent exit)"
+            )
+        # Bounded thread join after kill so we don't hang on the
+        # pipe-reader threads — same rationale as the success path.
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
         return -1, "", "Timeout"
     except Exception as e:
         logger.error(f"Command failed: {e}")
@@ -718,6 +742,7 @@ Examples:
         )
 
     # ---- Collect Semgrep results ----
+    semgrep_timed_out = False
     if semgrep_proc:
         try:
             semgrep_stdout, semgrep_stderr = semgrep_proc.communicate(timeout=1800)
@@ -726,8 +751,29 @@ Examples:
             semgrep_proc.kill()
             semgrep_proc.communicate()
             rc = -1
+            semgrep_timed_out = True
             print("❌ Semgrep scan timed out (30m)")
             logger.error("Semgrep scan timed out")
+            # Surface the timeout in the agentic-run summary even when
+            # CodeQL also runs. Pre-fix the `if not run_codeql:
+            # sys.exit(1)` asymmetry made the timeout LOUDLY fail
+            # Semgrep-only runs but SILENTLY continue mixed runs —
+            # operator scrolling past the error mid-run could miss
+            # it and ship a "scan complete" report that was actually
+            # missing all Semgrep findings. Write a marker file so
+            # downstream consumers (project merge, /project status,
+            # final summary) see an unambiguous "Semgrep timed out"
+            # signal instead of just absent semgrep_*.json files
+            # (which look indistinguishable from "scan was disabled").
+            try:
+                from core.json import save_json as _save_json
+                _save_json(
+                    Path(args.out) / ".semgrep_timeout" if args.out
+                    else RaptorConfig.get_out_dir() / ".semgrep_timeout",
+                    {"timed_out_at_seconds": 1800, "stage": "semgrep"},
+                )
+            except Exception:
+                pass
             if not run_codeql:
                 sys.exit(1)
 
