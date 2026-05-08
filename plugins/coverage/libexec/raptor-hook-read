@@ -106,7 +106,7 @@ if [ -d "$FILE_PATH" ]; then
     exit 0
 fi
 case "${FILE_PATH##*.}" in
-    py|js|ts|jsx|tsx|c|h|cpp|hpp|cc|cxx|java|go|rs|rb|php|cs|swift|kt|scala|sh) ;;
+    py|js|ts|jsx|tsx|c|h|cpp|hpp|cc|cxx|java|go|rs|rb|php|cs|swift|kt|scala|sh|bash|zsh|zig|nim|cr|sol|dart|m|mm|lua|pl|pm|jl|ex|exs|erl|hrl|fs|fsi|fsx|ml|mli|clj|cljs|cljc|groovy|gradle|r|hs|elm|vue|svelte|astro|tf|tofu|nix) ;;
     *) exit 0 ;;
 esac
 
