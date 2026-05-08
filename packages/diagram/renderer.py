@@ -27,7 +27,24 @@ def render_directory(out_dir: Path, target: Optional[str] = None) -> str:
     sections: list[str] = []
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    target_str = f" for `{target}`" if target else ""
+    # Escape backticks in `target`. Pre-fix `target` was
+    # interpolated raw between backticks: `f" for `{target}`"`.
+    # An operator-supplied `--target` value containing a `` ` ``
+    # broke the markdown inline-code span and either:
+    #   * leaked the rest of the header line into raw markdown
+    #     rendering (a target like `` weird`name `` produced
+    #     `for `weird`name`` — the `name` rendered as bold/code
+    #     depending on what followed)
+    #   * matched another later `` ` `` in the document and
+    #     swallowed prose into a code span until the next
+    #     unmatched backtick
+    # `target` flows from the `--target` CLI flag in
+    # `generate_diagram.py` and is operator-controlled. Escape
+    # backticks to backslash-backtick so markdown renders them as
+    # literal characters; doesn't break valid targets that don't
+    # contain backticks.
+    safe_target = (target or "").replace("`", "\\`")
+    target_str = f" for `{safe_target}`" if target else ""
     sections.append(f"# Security Diagrams{target_str}\n\n_Generated {now}_\n")
 
     # --- Findings summary pies (exec summary, shown first) ---
