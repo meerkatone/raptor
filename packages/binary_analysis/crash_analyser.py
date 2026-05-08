@@ -653,10 +653,21 @@ class CrashAnalyser:
         """Fallback LLDB analysis with simpler commands."""
         logger.info("Using simplified LLDB analysis")
 
-        # Simpler commands that should complete faster
+        # Stdin redirect via subprocess fd, NOT via interpolating
+        # `input_file` into the LLDB script string. Pre-fix
+        # `f"process launch -i {input_file}"` interpolated the
+        # path raw — for paths with spaces, quotes, backslashes,
+        # or shell metacharacters the LLDB parser broke (LLDB's
+        # `process launch -i` arg is shell-tokenised; spaces in
+        # the path split it into multiple args). Same threat
+        # model as the GDB-debugger.py path that already feeds
+        # input via subprocess stdin (cluster 720). LLDB can
+        # accept stdin via `process launch` with no `-i` flag
+        # — the inferior inherits the parent's stdin by default,
+        # which is the subprocess fd we open below.
         lldb_commands = [
             "settings set auto-confirm true",
-            f"process launch -i {input_file}",  # LLDB syntax for stdin input
+            "process launch",  # inferior inherits parent stdin
             "bt",  # Simple backtrace
             "register read",  # Registers
             "quit",
@@ -675,14 +686,16 @@ class CrashAnalyser:
 
             # LLDB fallback — also a debugger, needs ptrace (profile='debug').
             binary_dir = str(self.binary.parent.resolve())
-            result = _sandbox_run(
-                ["lldb", "-b", "-s", str(cmd_file), str(self.binary)],
-                profile="debug",
-                target=binary_dir, output=binary_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            with open(input_file, "rb") as fh_in:
+                result = _sandbox_run(
+                    ["lldb", "-b", "-s", str(cmd_file), str(self.binary)],
+                    stdin=fh_in,
+                    profile="debug",
+                    target=binary_dir, output=binary_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
             return result.stdout
         except subprocess.TimeoutExpired:
             logger.error("LLDB fallback also timed out")
