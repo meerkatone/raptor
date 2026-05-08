@@ -67,7 +67,7 @@ See `tiers/personas/` directory for complete persona files.
 ```
 User: /scan
 
-Claude: [Python executes raptor.py agentic]
+Claude: [Python executes raptor.py scan]
         [Scan completes]
 
         Results: 15 vulnerabilities found
@@ -126,7 +126,7 @@ User: /scan
 CLAUDE.md loads (360t)
 Session greeting: "RAPTOR ready..."
    ↓
-Python executes: raptor.py agentic
+Python executes: raptor.py scan
    ↓
 Scan completes → Results saved to out/
    ↓
