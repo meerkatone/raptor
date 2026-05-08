@@ -97,14 +97,28 @@ def _is_validated(workdir, filename):
 
 
 def _validate_file(workdir, filename, validator_func):
-    """Validate a file, skipping if already validated by raptor-validate-schema."""
+    """Validate a file, skipping if already validated by raptor-validate-schema.
+
+    Returns ``(valid, errors)``:
+      * ``(True, [])`` — file exists, validator approved
+      * ``(False, [...])`` — file exists, validator rejected
+      * ``(False, ["missing"])`` — file does not exist or is empty
+
+    Pre-fix the missing-file path returned ``(True, [])``, which
+    conflated "file doesn't exist" with "file exists and is
+    valid". Callers that just printed didn't notice — but any
+    consumer that checks the boolean return ("did validation
+    pass?") incorrectly saw True when there was nothing to
+    validate. Return False with a sentinel error string so
+    callers can distinguish the three states.
+    """
     if _is_validated(workdir, filename):
         print(f"  {filename}: OK (cached)")
         return True, []
     data = load_json(Path(workdir) / filename)
     if not data:
         print(f"  {filename}: not found")
-        return True, []
+        return False, ["missing"]
     valid, errors = validator_func(data)
     if not valid:
         print(f"  {filename}: ERRORS {errors}")
