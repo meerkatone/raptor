@@ -330,6 +330,39 @@ def _build_standalone_pocs(target, build_dir):
             print("No C compiler found — skipping PoC build")
             return
 
+    # Sandbox the compile invocations. Pre-fix `_sp.run(cmd)`
+    # spawned the compiler with the operator's full env and no
+    # filesystem isolation. Two failure modes:
+    #
+    # 1. The PoC source files come from an LLM-supplied stage-D
+    #    output (`build/poc-*.c`). A hostile / errant LLM
+    #    response could embed `#include` directives pointing at
+    #    `/etc/`, attribute pragmas with code-exec side effects
+    #    (gcc's `__attribute__((constructor))` runs at -E preprocess
+    #    time on some toolchains), or `#error` directives that
+    #    leak environment via the error message.
+    # 2. Compiler env injection: `CC` / `CFLAGS` / `LDFLAGS` /
+    #    `LD_PRELOAD` from the operator's shell flowed into the
+    #    compile, potentially building with attacker-controlled
+    #    flags (e.g. `LDFLAGS="-Wl,--no-as-needed -lattackerlib"`
+    #    auto-loads attacker code into the resulting binary).
+    #
+    # Route through `_sandbox_run` (already used elsewhere in
+    # this file): seccomp + landlock confines reads to the
+    # source dir + standard system paths, writes to the build
+    # dir, blocks network. `RaptorConfig.get_safe_env()` strips
+    # the dangerous env vars before the compile sees them.
+    # Fall back to plain `_sp.run` only if `_sandbox_run` import
+    # fails — preserves pre-fix behaviour for unusual install
+    # layouts where core.sandbox isn't reachable.
+    try:
+        from core.sandbox import run as _sandbox_run
+        from core.config import RaptorConfig
+        _safe_env = RaptorConfig.get_safe_env()
+    except ImportError:
+        _sandbox_run = None
+        _safe_env = None
+
     built = 0
     for source in sources:
         output = build_dir / source.stem
@@ -338,7 +371,17 @@ def _build_standalone_pocs(target, build_dir):
             continue
         cmd = [compiler] + _POC_GCC_FLAGS + ["-o", str(output), str(source)]
         try:
-            result = _sp.run(cmd, capture_output=True, text=True, timeout=30)
+            if _sandbox_run is not None:
+                result = _sandbox_run(
+                    cmd,
+                    target=str(target.resolve()),
+                    output=str(build_dir.resolve()),
+                    block_network=True,
+                    capture_output=True, text=True, timeout=30,
+                    env=_safe_env,
+                )
+            else:
+                result = _sp.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
                 print(f"  Built: {source.name} -> {output.name}")
                 if result.stderr.strip():
