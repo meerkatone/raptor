@@ -34,19 +34,15 @@ fi
 # vars, editor/pager, Kerberos, etc.) are handled by
 # core.config.get_safe_env() when we spawn children — stripping them
 # here would needlessly break the user's legitimate environment.
-for _var in \
-    LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT \
-    LD_DEBUG LD_PROFILE LD_PROFILE_OUTPUT \
-    GCONV_PATH \
-    PYTHONSTARTUP PYTHONPATH PYTHONHOME PYTHONUSERBASE \
-    PYTHONBREAKPOINT PYTHONINSPECT \
-    OPENSSL_CONF SSLKEYLOGFILE \
-    NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS \
-    MALLOC_CONF JE_MALLOC_CONF MALLOC_CHECK_ MALLOC_PERTURB_ \
-    BASH_ENV ENV ; do
-    unset "$_var"
-done
-unset _var
+# Sourced from core/security/_dangerous_env_strip.sh — single
+# source of truth shared with bin/cve-diff. Lives next to its
+# Python siblings (core/config.RaptorConfig.DANGEROUS_ENV_VARS
+# + core/security/env_sanitisation.strip_env_vars) so a single
+# `git grep` over core/security/ surfaces the canonical list
+# regardless of which language layer is enforcing.
+# RAPTOR_DIR isn't set yet (this runs before the python entry
+# point), so we resolve the strip-list path relative to this script.
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../core/security/_dangerous_env_strip.sh"
 # Added by batch 581:
 #   * LD_DEBUG / LD_PROFILE / LD_PROFILE_OUTPUT — glibc loader
 #     diagnostic env vars that write profile data to operator-
