@@ -721,20 +721,51 @@ class CrashAnalyser:
                 context.signal = "05"
                 break
 
-        # Extract registers (LLDB format: register read output)
+        # Extract registers (LLDB format: register read output).
+        # State-machine terminators: pre-fix the only reset of
+        # `in_registers` was the `elif "thread backtrace"` clause.
+        # If LLDB output had a registers section followed by
+        # something OTHER than backtrace (e.g. `disassemble` block,
+        # `image lookup`, `expression result`), in_registers stayed
+        # True for the rest of the loop and any line containing
+        # ` = 0x` got misclassified as a register (e.g. a disasm
+        # line `0x12345 movq $0x10, %rax` has ` = 0x` after split,
+        # producing fictional register entries).
+        # Add the standard LLDB section terminators:
+        # `disassemble`, `info ` (info-* command output), `frame `,
+        # `(lldb)` (command prompt re-emergence), and any blank
+        # line followed by an indent-0 token (typical LLDB section
+        # boundary).
         in_registers = False
+        section_terminators = (
+            "thread backtrace",
+            "disassemble",
+            "image lookup",
+            "expression",
+            "(lldb)",
+        )
         for line in lines:
             if "register read" in line.lower() or in_registers:
                 in_registers = True
+                lower = line.lower()
+                # Reset on any known section start.
+                if any(term in lower for term in section_terminators):
+                    in_registers = False
+                    continue
                 # LLDB register format: "    x0 = 0x0000000000000000"
                 if " = 0x" in line and not line.startswith("General Purpose Registers"):
                     parts = line.strip().split(" = ")
                     if len(parts) == 2:
                         reg_name = parts[0].strip()
                         reg_value = parts[1].strip()
-                        context.registers[reg_name] = reg_value
-                elif "thread backtrace" in line.lower():
-                    in_registers = False
+                        # Reject keys that contain whitespace —
+                        # those aren't real register names; they're
+                        # disasm bytes or other section content
+                        # that slipped past the terminator (e.g.
+                        # an unknown new section that we don't
+                        # have a terminator for yet).
+                        if reg_name and " " not in reg_name and "\t" not in reg_name:
+                            context.registers[reg_name] = reg_value
 
         # Extract stack trace (LLDB format).
         # Frame lines start with `frame #0:`, `frame #1:`, etc.
