@@ -11,7 +11,7 @@ You are helping the user fuzz a binary executable with RAPTOR's AFL++ integratio
 1. **Understand the target**: Identify which binary to fuzz
    - Get the full path to the binary
    - Ask about input mode (stdin or file)
-   - Ask about fuzzing duration (default: 110 minutes)
+   - Ask about fuzzing duration (default: 60 minutes / 3600 seconds)
 
 2. **Check prerequisites**: Before fuzzing, verify:
    - Binary exists and is executable
