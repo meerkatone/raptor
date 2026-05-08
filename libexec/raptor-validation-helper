@@ -266,12 +266,30 @@ def _build_standalone_pocs(target, build_dir):
         print("Target has a build system — skipping PoC build")
         return
 
+    # Read each candidate file ONCE, not twice. Pre-fix the
+    # `("int main" in f.read_text(...)) or ("void main" in
+    # f.read_text(...))` shape called `read_text` twice per
+    # file — the second call only happened when "int main" was
+    # absent, but the first call always ran. For C/C++ source
+    # trees with hundreds of files (heavy projects, big test
+    # corpuses), the per-file cost doubled for the
+    # "int main"-less subset (typically the majority — most
+    # files are headers / library code, not standalone main()
+    # programs). Materialise the text once via a generator
+    # filter so each file is read at most once regardless of
+    # which marker matches.
     extensions = {".c", ".cpp", ".cc", ".cxx"}
+
+    def _has_main(f):
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        return "int main" in text or "void main" in text
+
     sources = [
         f for f in sorted(target.iterdir())
-        if f.is_file() and f.suffix.lower() in extensions
-        and ("int main" in f.read_text(encoding="utf-8", errors="ignore")
-             or "void main" in f.read_text(encoding="utf-8", errors="ignore"))
+        if f.is_file() and f.suffix.lower() in extensions and _has_main(f)
     ]
     if not sources:
         return
