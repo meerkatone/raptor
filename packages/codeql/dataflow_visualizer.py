@@ -621,7 +621,7 @@ class DataflowVisualizer:
         lines.append("")
 
         # Add source node
-        lines.append(f'    A0["🔴 SOURCE<br/>{self._escape_mermaid(dataflow.source.label)}<br/><i>{dataflow.source.file_path}:{dataflow.source.line}</i>"]')
+        lines.append(f'    A0["🔴 SOURCE<br/>{self._escape_mermaid(dataflow.source.label)}<br/><i>{self._escape_mermaid(dataflow.source.file_path)}:{dataflow.source.line}</i>"]')
         lines.append('    style A0 fill:#f48771,stroke:#fff,stroke-width:2px,color:#000')
         lines.append("")
 
@@ -634,7 +634,7 @@ class DataflowVisualizer:
             emoji = "🛡️" if is_sanitizer else "⚙️"
             color = "#dcdcaa" if is_sanitizer else "#4ec9b0"
 
-            lines.append(f'    {node_id}["{emoji} STEP {i}<br/>{self._escape_mermaid(step.label)}<br/><i>{step.file_path}:{step.line}</i>"]')
+            lines.append(f'    {node_id}["{emoji} STEP {i}<br/>{self._escape_mermaid(step.label)}<br/><i>{self._escape_mermaid(step.file_path)}:{step.line}</i>"]')
             lines.append(f'    style {node_id} fill:{color},stroke:#fff,stroke-width:2px,color:#000')
             lines.append(f'    {prev_id} --> {node_id}')
             lines.append("")
@@ -642,7 +642,7 @@ class DataflowVisualizer:
 
         # Add sink node
         sink_id = f"A{len(dataflow.intermediate_steps) + 1}"
-        lines.append(f'    {sink_id}["🔥 SINK<br/>{self._escape_mermaid(dataflow.sink.label)}<br/><i>{dataflow.sink.file_path}:{dataflow.sink.line}</i>"]')
+        lines.append(f'    {sink_id}["🔥 SINK<br/>{self._escape_mermaid(dataflow.sink.label)}<br/><i>{self._escape_mermaid(dataflow.sink.file_path)}:{dataflow.sink.line}</i>"]')
         lines.append(f'    style {sink_id} fill:#d16969,stroke:#fff,stroke-width:2px,color:#000')
         lines.append(f'    {prev_id} --> {sink_id}')
         lines.append("")
@@ -801,7 +801,7 @@ class DataflowVisualizer:
         lines.append("")
 
         # Source node
-        lines.append(f'    node0 [label="SOURCE\\n{self._escape_dot(dataflow.source.label)}\\n{dataflow.source.file_path}:{dataflow.source.line}", fillcolor="#f48771"];')
+        lines.append(f'    node0 [label="SOURCE\\n{self._escape_dot(dataflow.source.label)}\\n{self._escape_dot(dataflow.source.file_path)}:{dataflow.source.line}", fillcolor="#f48771"];')
 
         # Intermediate nodes
         for i, step in enumerate(dataflow.intermediate_steps, 1):
@@ -809,11 +809,11 @@ class DataflowVisualizer:
             color = "#dcdcaa" if is_sanitizer else "#4ec9b0"
             node_type = "SANITIZER" if is_sanitizer else f"STEP {i}"
 
-            lines.append(f'    node{i} [label="{node_type}\\n{self._escape_dot(step.label)}\\n{step.file_path}:{step.line}", fillcolor="{color}"];')
+            lines.append(f'    node{i} [label="{node_type}\\n{self._escape_dot(step.label)}\\n{self._escape_dot(step.file_path)}:{step.line}", fillcolor="{color}"];')
 
         # Sink node
         sink_id = len(dataflow.intermediate_steps) + 1
-        lines.append(f'    node{sink_id} [label="SINK\\n{self._escape_dot(dataflow.sink.label)}\\n{dataflow.sink.file_path}:{dataflow.sink.line}", fillcolor="#d16969"];')
+        lines.append(f'    node{sink_id} [label="SINK\\n{self._escape_dot(dataflow.sink.label)}\\n{self._escape_dot(dataflow.sink.file_path)}:{dataflow.sink.line}", fillcolor="#d16969"];')
 
         lines.append("")
 
