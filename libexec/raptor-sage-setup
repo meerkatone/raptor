@@ -159,8 +159,22 @@ merge_mcp_entry() {
         echo "Created $MCP."
         return
     fi
+    # `mktemp -p` under the target directory so the subsequent
+    # `mv` is on the same filesystem (atomic rename). Pre-fix
+    # `mktemp` defaulted to `/tmp` (or whatever `$TMPDIR` resolved
+    # to), then `mv tmp $MCP` was a CROSS-FILESYSTEM move on
+    # systems where the target ($RAPTOR_DIR) and /tmp are on
+    # different mount points (common on container layouts where
+    # /tmp is tmpfs and $RAPTOR_DIR is a bind-mounted host dir;
+    # also common on dev hosts with a separate /tmp partition).
+    # Cross-fs `mv` is implemented as copy+unlink — NOT atomic;
+    # a Ctrl-C / OOM kill / power loss between the copy and the
+    # unlink leaves the source file in /tmp and the target
+    # half-written, so concurrent readers of $MCP see a partial
+    # file. Same-fs mktemp ensures the rename is atomic at the
+    # filesystem-metadata level.
     local tmp
-    tmp=$(mktemp); _RAPTOR_TMP_FILES+=("$tmp")
+    tmp=$(mktemp -p "$(dirname "$MCP")" .tmp.mcp.XXXXXX); _RAPTOR_TMP_FILES+=("$tmp")
     trap 'rm -f "$tmp"' RETURN
     jq -s '.[0] * .[1]' "$MCP" "$TEMPLATE" > "$tmp"
     mv "$tmp" "$MCP"
@@ -170,8 +184,9 @@ merge_mcp_entry() {
 
 remove_mcp_entry() {
     [ -f "$MCP" ] || return 0
+    # Same same-fs mktemp pattern as merge_mcp_entry above.
     local tmp
-    tmp=$(mktemp); _RAPTOR_TMP_FILES+=("$tmp")
+    tmp=$(mktemp -p "$(dirname "$MCP")" .tmp.mcp.XXXXXX); _RAPTOR_TMP_FILES+=("$tmp")
     trap 'rm -f "$tmp"' RETURN
     jq 'del(.mcpServers.sage)' "$MCP" > "$tmp"
     mv "$tmp" "$MCP"
