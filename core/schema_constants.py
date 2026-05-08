@@ -267,11 +267,14 @@ CWE_TO_VULN_TYPE = {
     "CWE-20": "other",              # Improper input validation
     "CWE-22": "path_traversal",
     "CWE-77": "command_injection",   # Generic command injection
+    "CWE-20": "other",              # Improper input validation (parent of injection-class CWEs; mark generic so a more-specific child wins when both appear)
+    "CWE-77": "command_injection",   # Command injection (parent of CWE-78 OS command injection — same vuln_type)
     "CWE-78": "command_injection",
     "CWE-79": "xss",
     "CWE-89": "sql_injection",
     "CWE-90": "other",              # LDAP injection
     "CWE-91": "other",              # XML injection
+    "CWE-93": "other",              # CRLF injection (no closer-fitting vuln_type — typically header smuggling)
     "CWE-94": "command_injection",   # Code injection
     "CWE-119": "buffer_overflow",    # Generic buffer issue
     "CWE-120": "buffer_overflow",
@@ -332,6 +335,7 @@ CWE_TO_VULN_TYPE = {
     "CWE-908": "uninitialized_memory", # Use of uninitialized resource
     "CWE-918": "ssrf",
     "CWE-923": "weak_crypto",       # Improper restriction of comm. channel
+    "CWE-1004": "other",            # Sensitive cookie missing HttpOnly
     "CWE-1188": "other",            # Insecure default initialization
     "CWE-1333": "other",            # Inefficient regex (ReDoS)
 }
@@ -360,4 +364,12 @@ VULN_TYPE_TO_CWE = {
     "out_of_bounds_write": "CWE-787",
     "type_confusion": "CWE-843",
     "ssrf": "CWE-918",
+    # Round-trip closure: every vuln_type that appears as a value
+    # in CWE_TO_VULN_TYPE above should also appear as a key here so
+    # callers can convert in BOTH directions. Pre-fix five
+    # categories were forward-only:
+    "memory_leak": "CWE-401",
+    "hardcoded_secret": "CWE-798",
+    "uninitialized_memory": "CWE-908",  # Use of uninitialized resource (more general than 457 init-only)
+    "privilege_confusion": "CWE-269",
 }
