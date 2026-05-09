@@ -99,7 +99,22 @@ class RootCauseAnalyzer:
                 output_tokens=response.output_tokens,
             )
         except (KeyError, TypeError, ValueError) as exc:
-            raise AnalysisError(f"response missing required field: {exc}. got={data!r}") from exc
+            # Sanitise the LLM-supplied data dict before embedding in
+            # the exception message. The exception text is logged and
+            # surfaced to operators; the LLM controls `data` and a
+            # crafted response can include control bytes (ANSI
+            # escapes, BIDI overrides, NUL) that hijack the
+            # terminal display when the operator pipes the log into
+            # `less` or `tail`. `escape_nonprintable` turns each into
+            # a visible `\xNN` escape.
+            try:
+                from core.security.log_sanitisation import escape_nonprintable
+                _safe_data = escape_nonprintable(repr(data))
+            except Exception:  # noqa: BLE001 — defensive; fall back to bare repr
+                _safe_data = repr(data)
+            raise AnalysisError(
+                f"response missing required field: {exc}. got={_safe_data}"
+            ) from exc
 
     def _render_prompt(self, bundle: DiffBundle) -> str:
         tmpl = _load_template("root_cause.txt")
@@ -130,15 +145,40 @@ def _parse_json_payload(text: str) -> dict:
     m = _JSON_FENCE_RE.search(text)
     if m:
         text = m.group("body")
-    else:
-        first = text.find("{")
-        last = text.rfind("}")
-        if first >= 0 and last > first:
-            text = text[first : last + 1]
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise AnalysisError(f"model returned non-JSON payload: {exc}") from exc
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise AnalysisError(f"model returned non-JSON payload: {exc}") from exc
+
+    # No fenced block — scan forward through `{` positions and use
+    # `JSONDecoder.raw_decode` to consume only the JSON prefix at
+    # each position (ignores trailing prose like "Hope that helps!").
+    # Pre-fix the `text[first:last+1]` extraction picked the WIDEST
+    # `{...}` span, so an LLM response with prose-embedded `{` glyphs
+    # before the actual JSON ("the function takes { args } and
+    # returns: {valid_json}") spanned the prose AND the JSON,
+    # breaking the parse. Bound the scan at 16 attempts so a
+    # response with many literal `{` glyphs (a list of code
+    # samples) doesn't burn measurable wallclock.
+    _decoder = json.JSONDecoder()
+    _attempts = 0
+    _start = 0
+    last_exc: Exception | None = None
+    while _attempts < 16:
+        idx = text.find("{", _start)
+        if idx < 0:
+            break
+        try:
+            obj, _ = _decoder.raw_decode(text[idx:])
+            return obj
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            _start = idx + 1
+            _attempts += 1
+    raise AnalysisError(
+        f"model returned non-JSON payload "
+        f"(scanned {_attempts} brace positions): {last_exc}"
+    ) from last_exc
 
 
 _CWE_RE = re.compile(r"CWE[-_\s]?(\d+)", re.IGNORECASE)

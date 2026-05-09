@@ -619,7 +619,17 @@ class AFLRunner:
             return {}
 
         stats = {}
-        with open(stats_file) as f:
+        # Explicit `encoding="utf-8"` + `errors="replace"`. Pre-fix
+        # bare `open(stats_file)` used the host locale encoding —
+        # AFL writes its `fuzzer_stats` file in UTF-8 (the C side
+        # writes ASCII keys + UTF-8 stringified values), so a
+        # latin-1 / cp1252 default could mojibake non-ASCII path
+        # components in `target_mode`, `command_line`, etc., and
+        # raise UnicodeDecodeError on operator paths with i18n
+        # characters. `errors="replace"` keeps the parse going even
+        # if a byte sequence somehow doesn't decode (preferred over
+        # crashing the whole stats read for a single bad value).
+        with open(stats_file, encoding="utf-8", errors="replace") as f:
             for line in f:
                 if ":" in line:
                     key, value = line.strip().split(":", 1)
@@ -684,6 +694,19 @@ class AFLRunner:
             if test_input:
                 readable_paths.append(str(Path(test_input).parent))
 
+            # Bound afl-showmap wallclock. Pre-fix the call had no
+            # `timeout=` — afl-showmap runs the (attacker-controlled)
+            # target binary with a single corpus entry to extract
+            # coverage; a target with an infinite loop, a sleep, or
+            # any non-terminating control flow on the chosen input
+            # would hang the analyser indefinitely. afl-showmap's
+            # own `-t` flag bounds the per-execution timeout, but a
+            # subprocess-level safety net catches the wedge case
+            # where the target ignores SIGALRM (e.g. a binary that
+            # blocks signals or installs a custom handler that
+            # masks the timeout). 5 minutes is generous: typical
+            # showmap runs are sub-second; even instrumentation-
+            # heavy binaries finish in well under a minute.
             result = _sandbox_run(
                 showmap_cmd,
                 block_network=True,
@@ -695,6 +718,7 @@ class AFLRunner:
                 stdin=stdin_input,
                 cwd=str(self.output_dir),
                 env=env,
+                timeout=300,
             )
 
             # Parse output for coverage info

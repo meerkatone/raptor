@@ -407,8 +407,23 @@ class JsonCache:
         for part in key.split("/"):
             if not part or part in (".", ".."):
                 continue
-            # Strip path separators that may have leaked in.
-            clean_parts.append(part.replace(os.sep, "_"))
+            # Strip BOTH separators regardless of host. Pre-fix
+            # `part.replace(os.sep, "_")` only stripped the host's
+            # separator — on Linux (os.sep="/") an embedded
+            # backslash from a Windows-formatted cache key
+            # (`"vulns\\GHSA-xxx"`) leaked through; the resulting
+            # filename either confused downstream tooling or, on a
+            # filesystem that honours backslash as a literal byte,
+            # produced a file with a backslash in its name that
+            # later glob patterns missed. Replace both `\` and `/`
+            # explicitly so the same key produces the same cache
+            # file regardless of which platform formatted it.
+            clean = part.replace("\\", "_").replace("/", "_")
+            # Strip os.sep too in case the platform uses a third
+            # separator (Path.alt_sep on some systems).
+            if os.sep not in ("\\", "/"):
+                clean = clean.replace(os.sep, "_")
+            clean_parts.append(clean)
         if not clean_parts:
             raise ValueError(f"empty cache key after sanitisation: {key!r}")
         # Append the suffix directly rather than ``Path.with_suffix``:

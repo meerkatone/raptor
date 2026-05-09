@@ -101,9 +101,22 @@ def main():
 
     target = target or ""
 
-    # Read hook payload from stdin
+    # Read hook payload from stdin. Cap at 1 MB before parsing.
+    # Pre-fix `json.load(sys.stdin)` was unbounded — a hostile
+    # hook payload (or a Claude Code bug feeding the wrong fd)
+    # could pipe gigabytes of data and OOM the hook. Real Read-
+    # tool payloads are <2 KB (file_path + cwd + small metadata);
+    # 1 MB is a 500x safety margin while bounding pathological
+    # input.
+    _MAX_STDIN_BYTES = 1 * 1024 * 1024
     try:
-        payload = json.load(sys.stdin)
+        _stdin_text = sys.stdin.read(_MAX_STDIN_BYTES + 1)
+    except (OSError, ValueError):
+        return
+    if len(_stdin_text) > _MAX_STDIN_BYTES:
+        return
+    try:
+        payload = json.loads(_stdin_text or "{}")
     except (json.JSONDecodeError, ValueError):
         return
 

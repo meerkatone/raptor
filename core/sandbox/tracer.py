@@ -1467,7 +1467,17 @@ def _handle_waitpid_event(
                     family, port, ip = sock
                     path = f"{ip}:{port} ({family})"
 
-            if audit_filter is not None and not audit_filter.get("verbose"):
+            # `isinstance` guard before `audit_filter.get(...)`.
+            # Pre-fix the `audit_filter is not None` test accepted
+            # any truthy value — a caller (or a stale config-load
+            # path) passing a string, list, or other non-dict would
+            # crash with `AttributeError: 'X' has no attribute
+            # 'get'` on the very next line. Treat non-dict as
+            # "audit_filter not configured" and fall through to
+            # the unfiltered branch.
+            if (audit_filter is not None
+                and isinstance(audit_filter, dict)
+                and not audit_filter.get("verbose")):
                 # Filtered mode: drop events that would have been
                 # ALLOWED under enforcement. The signal then becomes
                 # "what would have been blocked" — the operator's

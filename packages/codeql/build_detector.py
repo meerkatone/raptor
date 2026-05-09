@@ -777,6 +777,23 @@ Tolerates individual compilation failures.
 """
 import os, subprocess, sys
 
+# Strip dynamic-loader injection vars from the env we pass to each
+# compile subprocess. CodeQL's tracer wraps the build script with
+# its own preload library to capture compiler invocations; the
+# script itself shouldn't FORWARD a parent's LD_PRELOAD /
+# LD_LIBRARY_PATH / DYLD_* / PYTHONPATH (or other code-injection
+# vars) to gcc/javac, which would then attach attacker code at
+# every compile step. Build a one-shot scrubbed env here; reuse
+# across the per-file loop.
+_SCRUB_ENV_VARS = (
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    "PYTHONPATH", "PYTHONSTARTUP",
+    "BASH_ENV", "ENV",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+)
+_BUILD_ENV = {{k: v for k, v in os.environ.items() if k not in _SCRUB_ENV_VARS}}
+
 COMPILER = {compiler!r}
 FLAGS = {(include_flags + define_flags)!r}
 BUILD_DIR = {str(build_dir)!r}
@@ -831,7 +848,7 @@ for i, src in enumerate(FILES):
     # capped at 256 KB — enough for a useful diagnostic
     # excerpt, hard upper bound. Drain remaining bytes via
     # /dev/null so the child can finish without SIGPIPE.
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, env=_BUILD_ENV)
     _STDERR_CAP = 256 * 1024
     captured = b""
     if proc.stderr is not None:
@@ -1117,11 +1134,34 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             try:
                 data = json.loads(content)
             except json.JSONDecodeError:
-                try:
-                    idx = content.index("{")
-                    data = json.loads(content[idx:])
-                except (ValueError, json.JSONDecodeError):
-                    logger.debug("CC output wasn't valid JSON")
+                # Recover by scanning forward through `{` positions and
+                # picking the FIRST one whose tail JSON-parses cleanly.
+                # Pre-fix `idx = content.index("{")` always picked the
+                # first `{` — but LLM prose with embedded `{` glyphs
+                # ("the function takes { foo, bar } as params, here is
+                # the JSON: {valid}") parsed from the wrong position
+                # and silently dropped the real answer. Bound the
+                # scan at 16 attempts so a CC output full of literal
+                # `{` glyphs (a list of code samples) doesn't burn
+                # measurable wallclock retrying.
+                data = None
+                _attempts = 0
+                _start = 0
+                while _attempts < 16:
+                    idx = content.find("{", _start)
+                    if idx < 0:
+                        break
+                    try:
+                        data = json.loads(content[idx:])
+                        break
+                    except (ValueError, json.JSONDecodeError):
+                        _start = idx + 1
+                        _attempts += 1
+                if data is None:
+                    logger.debug(
+                        "CC output wasn't valid JSON after %d brace probes",
+                        _attempts,
+                    )
                     return None
 
             # Pre-fix `data.get("includes", [])` returned the

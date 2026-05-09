@@ -986,21 +986,75 @@ def _extract_globals_ts(root_node, language: str) -> List[CodeItem]:
 
     target_types = global_types.get(language, ())
 
-    for child in root_node.children:
+    # Java field_declarations live INSIDE class_body, not at the root.
+    # Pre-fix iterating `root_node.children` and matching against
+    # `field_declaration` returned ZERO Java fields — every Java
+    # source's class fields were silently absent from the inventory.
+    # Walk into class/interface bodies to find them. Other languages
+    # (C/C++/Go/Python/JS/TS) declare globals at file scope, so the
+    # default direct-children walk is correct for them.
+    if language == "java":
+        scan_nodes = []
+        for top in root_node.children:
+            if top.type in ("class_declaration", "interface_declaration",
+                             "enum_declaration", "record_declaration"):
+                # Find the body node and walk its children for fields.
+                body = next(
+                    (c for c in top.children if c.type in ("class_body", "interface_body",
+                                                            "enum_body", "record_body")),
+                    None,
+                )
+                if body is not None:
+                    scan_nodes.extend(body.children)
+            else:
+                scan_nodes.append(top)
+    else:
+        scan_nodes = root_node.children
+
+    for child in scan_nodes:
         if child.type not in target_types:
             continue
 
-        # Only top-level declarations (not inside functions/classes)
-        name = _global_name(child, language)
-        if name:
-            globals_found.append(CodeItem(
-                name=name,
-                kind=KIND_GLOBAL,
-                line_start=child.start_point[0] + 1,
-                line_end=child.end_point[0] + 1,
-            ))
+        # Only top-level declarations (not inside functions/classes).
+        # Emit ONE CodeItem per spec for languages that allow grouped
+        # declarations. Pre-fix `_global_name` returned a single
+        # name even for `var ( a int; b string; c bool )` — only
+        # `a` made it into the inventory; `b`, `c` were silently
+        # dropped. `_global_names` (plural) yields every name in
+        # the declaration. Falls back to the single-name path for
+        # languages where multi-spec isn't a thing.
+        names = _global_names(child, language)
+        for name in names:
+            if name:
+                globals_found.append(CodeItem(
+                    name=name,
+                    kind=KIND_GLOBAL,
+                    line_start=child.start_point[0] + 1,
+                    line_end=child.end_point[0] + 1,
+                ))
 
     return globals_found
+
+
+def _global_names(node, language: str):
+    """Yield every global name in a declaration node.
+
+    Most languages only declare one global per node — for those, the
+    legacy `_global_name` single-result is fine. Go's `var ( ... )`
+    and `const ( ... )` blocks declare multiple specs in a single
+    syntactic node; this helper yields every spec's name.
+    """
+    if language == "go":
+        for child in node.children:
+            if child.type == "var_spec" or child.type == "const_spec":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        yield sub.text.decode()
+        return
+    # Other languages: defer to the single-name function.
+    name = _global_name(node, language)
+    if name:
+        yield name
 
 
 def _global_name(node, language: str) -> Optional[str]:
@@ -1182,14 +1236,35 @@ def _count_comment_lines_regex(content: str, language: str) -> int:
             if stripped.startswith("#"):
                 count += 1
         elif language in ("c", "cpp", "java", "javascript", "typescript", "go"):
-            if in_block:
-                count += 1
-                if "*/" in stripped:
+            # State-machine comment-walk per line so the in_block
+            # state tracks every `/*` open and `*/` close on the
+            # line, including the `*/ /* still open` shape where a
+            # line closes a block and immediately opens a new one.
+            # Pre-fix the simple `if "*/" in stripped` close-check
+            # missed the re-open: in_block became False at line end,
+            # then every subsequent code line (which was actually
+            # inside the new block) was mis-counted as code until
+            # the eventual real `*/` arrived. Wallclock-cheap: each
+            # line scan is O(line_length).
+            entered_in_block = in_block
+            i = 0
+            while i < len(stripped):
+                if in_block:
+                    j = stripped.find("*/", i)
+                    if j < 0:
+                        break
                     in_block = False
-            elif stripped.startswith("//"):
-                count += 1
-            elif stripped.startswith("/*"):
-                count += 1
-                if "*/" not in stripped:
+                    i = j + 2
+                else:
+                    j = stripped.find("/*", i)
+                    if j < 0:
+                        break
                     in_block = True
+                    i = j + 2
+            # Count the line iff it starts inside a block, starts
+            # with `//`, or starts with `/*`.
+            if (entered_in_block
+                or stripped.startswith("//")
+                or stripped.startswith("/*")):
+                count += 1
     return count

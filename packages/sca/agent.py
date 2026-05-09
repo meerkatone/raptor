@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 # Use defusedxml for parsing target-repo XML files. Stdlib's
@@ -124,6 +125,18 @@ def _find_sca_agent() -> Optional[Path]:
                     env_path,
                 )
 
+    # Cap the marker-check read at 256 KB. Pre-fix `read_text()`
+    # loaded the WHOLE candidate file before the marker check —
+    # if RAPTOR_SCA_AGENT or the auto-discovery picked up a
+    # giant file by mistake (a vendored binary mislabeled as
+    # `agent.py`, an inadvertent log paste), we'd buffer the
+    # whole thing into memory just to confirm "no, this isn't
+    # the right file." The marker we're looking for
+    # (`from packages.sca import SCA_ALLOWED_HOSTS`) is at the
+    # top of any legitimate agent — 256 KB is two orders of
+    # magnitude beyond any realistic Python module's first-block
+    # imports.
+    _MAX_MARKER_BYTES = 256 * 1024
     for candidate in _SCA_AGENT_CANDIDATES:
         resolved = candidate.resolve()
         if resolved.is_file() and resolved.name == "agent.py":
@@ -131,7 +144,9 @@ def _find_sca_agent() -> Optional[Path]:
             # packages.sca.api, not core.json.  Check for the
             # SCA_ALLOWED_HOSTS import to distinguish it from this file.
             try:
-                text = resolved.read_text(encoding="utf-8")
+                with open(resolved, "r", encoding="utf-8",
+                          errors="replace") as fh:
+                    text = fh.read(_MAX_MARKER_BYTES)
                 if _looks_like_real_sca_agent(text, resolved):
                     return resolved
             except OSError:
@@ -219,27 +234,46 @@ def run_sca_subprocess(
         tuple(str(p) for p in writable_paths) if writable_paths else ()
     )
 
-    result = sandbox_run(
-        cmd,
-        use_egress_proxy=True,
-        proxy_hosts=list(SCA_ALLOWED_HOSTS),
-        caller_label="sca-agent",
-        target=str(target),
-        output=str(output_dir),
-        writable_paths=extra_writable,
-        # `env if env is not None else ...` — pre-fix `env or` was
-        # truthy-tested, so an EXPLICIT `env={}` (caller's signal
-        # "spawn with empty env") got replaced with the default
-        # safe env because `{}` is falsy. The empty-env intent
-        # was silently overridden — sandbox children inherited
-        # the caller-default RAPTOR env when caller had
-        # specifically asked for nothing. Explicit None check
-        # preserves the caller's `{}` choice.
-        env=env if env is not None else RaptorConfig.get_safe_env(),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    # Wrap sandbox_run in a TimeoutExpired catch. The function's
+    # return-type contract is `(returncode, stdout, stderr)` — pre-fix
+    # a TimeoutExpired exception escaped past the call site and
+    # surfaced to callers as an unhandled traceback when the
+    # docstring promised a tuple. Convert to a synthetic-failure
+    # tuple so callers' `if rc != 0` paths fire predictably.
+    try:
+        result = sandbox_run(
+            cmd,
+            use_egress_proxy=True,
+            proxy_hosts=list(SCA_ALLOWED_HOSTS),
+            caller_label="sca-agent",
+            target=str(target),
+            output=str(output_dir),
+            writable_paths=extra_writable,
+            # `env if env is not None else ...` — pre-fix `env or` was
+            # truthy-tested, so an EXPLICIT `env={}` (caller's signal
+            # "spawn with empty env") got replaced with the default
+            # safe env because `{}` is falsy. The empty-env intent
+            # was silently overridden — sandbox children inherited
+            # the caller-default RAPTOR env when caller had
+            # specifically asked for nothing. Explicit None check
+            # preserves the caller's `{}` choice.
+            env=env if env is not None else RaptorConfig.get_safe_env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Surface as a non-zero exit code with a structured stderr
+        # message. Stdout from the partial run (if any) is preserved
+        # so the caller's parsing layer can salvage what landed.
+        partial_stdout = (exc.stdout.decode("utf-8", errors="replace")
+                          if isinstance(exc.stdout, (bytes, bytearray))
+                          else (exc.stdout or ""))
+        return (
+            -1,
+            partial_stdout,
+            f"sca-agent timed out after {timeout}s",
+        )
     return result.returncode, result.stdout, result.stderr
 
 
@@ -270,22 +304,34 @@ _VENDOR_DIR_NAMES = frozenset({
 
 def find_dependency_files(root: Path) -> List[Path]:
     candidates = []
-    for pat in ['pom.xml', 'build.gradle', 'package.json',
-                'requirements.txt', 'pyproject.toml']:
-        for p in root.rglob(pat):
-            # Skip if any path component is a vendor / cache dir.
-            # Pre-fix `rglob` walked into node_modules and friends,
-            # picking up every transitive dep's package.json,
-            # multiplying the SCA report by orders of magnitude
-            # (a typical npm project has 1000+ nested
-            # package.json files, each producing duplicate /
-            # not-actionable advisories).
-            try:
-                rel_parts = p.relative_to(root).parts
-            except ValueError:
-                rel_parts = p.parts
-            if any(part in _VENDOR_DIR_NAMES for part in rel_parts[:-1]):
+    target_names = frozenset(['pom.xml', 'build.gradle', 'package.json',
+                              'requirements.txt', 'pyproject.toml'])
+    # `os.walk(followlinks=False)` with in-loop pruning of vendor /
+    # cache dirs. Pre-fix `root.rglob(pat)` for each pattern walked
+    # the WHOLE tree (including node_modules / .git / .venv /
+    # etc.) before the post-walk filter at the bottom skipped them
+    # — wasted I/O on a typical npm project's 100k+ files. Worse,
+    # `rglob` follows symlinks under Python <3.13: a symlink loop
+    # in the target tree would walk forever, and a symlink to
+    # /etc would walk that too.
+    #
+    # Pruning `dirnames` in-place at walk time skips entire
+    # subtrees rather than enumerating-then-filtering. Same
+    # pattern as core/inventory/builder.py uses for the same
+    # reason.
+    import os as _os
+    for dirpath, dirnames, filenames in _os.walk(
+        str(root), followlinks=False
+    ):
+        # Prune vendor / cache dirs in-place. The list-slice
+        # assignment is the documented os.walk pattern: the
+        # walker reads dirnames after the yield to decide where
+        # to descend.
+        dirnames[:] = [d for d in dirnames if d not in _VENDOR_DIR_NAMES]
+        for fname in filenames:
+            if fname not in target_names:
                 continue
+            p = Path(dirpath) / fname
             # Reject symlinks (file or any parent dir). `rglob`
             # follows symlinks by default on Python < 3.13 — a
             # symlink under the target repo pointing OUT to e.g.
@@ -428,6 +474,16 @@ def parse_pom(p):
             })
         return deps
     except Exception as e:
+        # Return type heterogeneity is an explicit contract here:
+        # success → `list` of dep dicts; failure → `{'error': ...}`
+        # dict. The contract is pinned by
+        # `test_returns_error_dict_on_invalid_xml` and
+        # `test_returns_error_dict_on_missing_file`.
+        # Call sites must check `isinstance(result, dict) and 'error'
+        # in result` before iterating — otherwise `for d in {...}`
+        # yields the dict's KEYS (i.e. the literal string `'error'`)
+        # which then feeds into OSV lookups as a "package name". See
+        # the parse_pom call site in `main()` for the correct usage.
         return {'error': str(e)}
 
 
@@ -551,6 +607,17 @@ def parse_requirements(p, _seen=None):
 
 def parse_package_json(p):
     try:
+        # Distinguish missing-file from parse-error. Pre-fix
+        # `load_json` returns None for BOTH "file doesn't exist" and
+        # "file exists but malformed" — the caller saw the same
+        # `'failed to parse JSON'` error string in either case, with
+        # no breadcrumb pointing at "the file isn't there at all"
+        # (which usually means a stale path in the caller's
+        # discovery output, not a parse problem).
+        from pathlib import Path as _Path
+        _p = _Path(p)
+        if not _p.exists():
+            return {'error': f'package.json not found at {p}'}
         obj = load_json(p)
         if obj is None:
             return {'error': 'failed to parse JSON'}
@@ -612,8 +679,34 @@ def main():
     }
     for p in find_dependency_files(repo):
         entry = {'path': str(p)}
+        # Race: between `find_dependency_files` enumeration and
+        # this parse, the file may have been deleted (concurrent
+        # `git checkout`, target rebuild, operator cleanup). Each
+        # parser handles missing-file differently:
+        # `parse_package_json` returns `{'error': 'package.json
+        # not found at ...'}` (post-S15 fix); `parse_pom` raises
+        # FileNotFoundError caught by its outer except as
+        # `{'error': str(e)}`; `parse_requirements` raises and
+        # the exception escapes. Pre-flight the existence check
+        # so the error envelope is uniform across all three
+        # parsers.
+        if not p.exists():
+            entry['error'] = f'file vanished between discovery and parse: {p}'
+            entry['deps'] = []
+            out['files'].append(entry)
+            continue
         if p.name == 'pom.xml':
-            entry['deps'] = parse_pom(p)
+            _result = parse_pom(p)
+            # Surface parse_pom's error-on-failure dict contract via
+            # an `error` field on the entry, then store an empty deps
+            # list so downstream consumers iterating `for d in
+            # entry['deps']` don't iterate the error dict's KEYS (the
+            # literal string `'error'`) and feed it into OSV lookups.
+            if isinstance(_result, dict) and 'error' in _result:
+                entry['error'] = _result['error']
+                entry['deps'] = []
+            else:
+                entry['deps'] = _result
         elif p.name == 'requirements.txt':
             entry['deps'] = parse_requirements(p)
         elif p.name == 'package.json':

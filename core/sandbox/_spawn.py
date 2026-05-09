@@ -106,9 +106,19 @@ def mount_ns_available() -> bool:
             return False
         try:
             import subprocess as _sp
+            # `env=` to a stripped environment so the probe doesn't
+            # inherit the parent's full env. Same rationale as the
+            # adjacent sandbox probes: LD_PRELOAD / LD_LIBRARY_PATH
+            # apply to setuid binaries (newuidmap is setuid root on
+            # most distros) only via the ld-secure list, but other
+            # env vars the binary inspects can still be operator-
+            # controlled. Keep the probe consistent with the rest
+            # of the sandbox-probe layer's env-hygiene posture.
+            from core.config import RaptorConfig
             r = _sp.run(
                 [newuidmap, "--help"],
                 capture_output=True, timeout=2,
+                env=RaptorConfig.get_safe_env(),
             )
             _ = r.returncode  # binary is callable
         except Exception:
@@ -126,7 +136,15 @@ def _run_newuidmap(child_pid: int, binary: str, mapping_lines: Sequence[str]) ->
     Example for `0 <host_uid> 1`:  ["0", "1000", "1"]
     """
     cmd = [binary, str(child_pid)] + list(mapping_lines)
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    # Same env-hygiene as the probe above. newuidmap/newgidmap are
+    # setuid root on most distros; the dynamic loader's secure-mode
+    # filter strips LD_PRELOAD etc. for those automatically, but
+    # belt-and-braces the env hygiene anyway.
+    from core.config import RaptorConfig
+    r = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=5,
+        env=RaptorConfig.get_safe_env(),
+    )
     if r.returncode != 0:
         raise RuntimeError(
             f"{binary} for child {child_pid} failed "

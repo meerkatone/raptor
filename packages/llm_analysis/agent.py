@@ -103,9 +103,28 @@ class VulnerabilityContext:
             logger.warning(f"Cannot read file: {file_path}")
             return False
 
+        # Cap source-file read at 10 MB. Pre-fix `f.readlines()`
+        # loaded the whole file into memory before any size check —
+        # a generated source file (single-line concatenated bundle,
+        # vendored data file misclassified as code, hostile target
+        # repo with a giant binary mislabeled as `.c`) would
+        # OOM-kill the analyser. Real C/C++/Java/Python source files
+        # are well under 1 MB; 10 MB leaves headroom for unusually
+        # large generated parsers / lexers while bounding
+        # pathological input. Truncated reads still return True so
+        # the agent can analyse the visible portion.
+        _MAX_SOURCE_BYTES = 10 * 1024 * 1024
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                content = f.read(_MAX_SOURCE_BYTES + 1)
+            if len(content) > _MAX_SOURCE_BYTES:
+                logger.warning(
+                    f"Source file {file_path} exceeded "
+                    f"{_MAX_SOURCE_BYTES}-byte cap; analysis sees "
+                    f"truncated content"
+                )
+                content = content[:_MAX_SOURCE_BYTES]
+            lines = content.splitlines(keepends=True)
 
             # Get the specific vulnerable lines
             if self.start_line and self.end_line:
@@ -152,8 +171,15 @@ class VulnerabilityContext:
             if not file_path.exists():
                 return f"[File not found: {file_uri}]"
 
+            # Same byte cap as read_vulnerable_code above. Same
+            # rationale: bound the in-flight memory regardless of
+            # source-file size.
+            _MAX_SOURCE_BYTES = 10 * 1024 * 1024
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                content = f.read(_MAX_SOURCE_BYTES + 1)
+            if len(content) > _MAX_SOURCE_BYTES:
+                content = content[:_MAX_SOURCE_BYTES]
+            lines = content.splitlines(keepends=True)
 
             # Get context around the line
             start = max(0, line - context_lines - 1)
