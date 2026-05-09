@@ -637,7 +637,29 @@ def bench(
         if service_health.has_critical_failure(results):
             typer.echo("aborting bench: critical service unhealthy", err=True)
             raise typer.Exit(code=1)
-    payload = json.loads(sample.read_text())
+    # Cap sample-file read at 50 MB. Pre-fix `sample.read_text()`
+    # was unbounded — a hostile or corrupted sample file (a 10 GB
+    # text dump misnamed as `.json`, an attacker-supplied sample
+    # path that points at /var/log/syslog or similar) would
+    # OOM-kill the bench process. Real CVE samples top out at a
+    # few MB (the largest published 10k-CVE sample is ~3 MB JSON);
+    # 50 MB leaves headroom for unusually verbose annotations
+    # while bounding pathological input.
+    _MAX_SAMPLE_BYTES = 50 * 1024 * 1024
+    try:
+        with open(sample, "r", encoding="utf-8") as _sf:
+            _sample_text = _sf.read(_MAX_SAMPLE_BYTES + 1)
+    except OSError as e:
+        typer.echo(f"bench: cannot read sample {sample}: {e}", err=True)
+        raise typer.Exit(code=1)
+    if len(_sample_text) > _MAX_SAMPLE_BYTES:
+        typer.echo(
+            f"bench: sample {sample} exceeds {_MAX_SAMPLE_BYTES} bytes — "
+            f"refusing to load (pathological input bounds enforced)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    payload = json.loads(_sample_text)
     cves = [c["cve_id"] for c in payload["cves"]]
     if limit > 0:
         cves = cves[:limit]
