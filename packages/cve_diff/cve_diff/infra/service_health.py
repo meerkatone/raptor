@@ -182,8 +182,25 @@ def probe_github() -> HealthResult:
     # Fall back whenever gh's stdout is empty for any reason.
     token = ""
     try:
-        out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
-                             timeout=2.0)
+        # `env=` to a stripped environment so the gh subprocess
+        # doesn't inherit the parent's full env. Pre-fix the bare
+        # subprocess carried LD_PRELOAD / LD_LIBRARY_PATH /
+        # PYTHONPATH / etc. through to the gh binary — gh is a Go
+        # binary that respects GODEBUG and a few other env vars,
+        # AND the dynamic loader's pre-load vars apply regardless of
+        # gh being statically linked or not (the loader inspects
+        # the env BEFORE any binary code runs). Pass GITHUB_TOKEN
+        # explicitly through the safe env so gh can find the
+        # operator's token.
+        from core.config import RaptorConfig
+        gh_env = RaptorConfig.get_safe_env()
+        if "GITHUB_TOKEN" in os.environ:
+            gh_env["GITHUB_TOKEN"] = os.environ["GITHUB_TOKEN"]
+        out = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True, text=True,
+            timeout=2.0, env=gh_env,
+        )
         token = (out.stdout or "").strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
