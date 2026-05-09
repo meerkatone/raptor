@@ -71,17 +71,28 @@ def strip_json_fences(text: str) -> str:
     """Strip markdown code fences wrapping JSON.
 
     LLMs (especially Gemini) wrap JSON responses in ```json ... ``` fences.
-    Returns the first valid JSON found inside fences, or the original text.
+    Returns the LAST valid JSON found inside fences, or the original text.
+
+    Prefers the LAST fenced JSON block. Pre-fix this returned the FIRST
+    candidate, which let an LLM cajoled into emitting a prose-embedded
+    ```json {fake} ``` block before its real answer have the fake
+    extraction picked by downstream parsers — silently dropping the
+    intended schema-validated answer. LLMs conventionally put their
+    final answer last; preferring the last block matches that convention
+    AND defeats prepend-prefix attacks where attacker-controlled tool
+    output (a finding's source code, a SARIF result message) coaxes the
+    LLM into echoing a fenced JSON block early in its response.
     """
     if "```" not in text:
         return text
     parts = text.split("```")
+    last_candidate: Optional[str] = None
     for part in parts[1::2]:
         lines = part.strip().split("\n", 1)
         candidate = lines[1].strip() if len(lines) > 1 and not lines[0].startswith("{") else part.strip()
         if candidate and candidate[0] in "{[":
-            return candidate
-    return text
+            last_candidate = candidate
+    return last_candidate if last_candidate is not None else text
 
 
 def extract_envelope_metadata(envelope: dict, into: dict) -> None:
