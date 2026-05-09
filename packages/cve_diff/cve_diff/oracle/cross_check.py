@@ -72,7 +72,19 @@ def _load_pick_from_osv_file(summary_dir: Path, cve_id: str) -> tuple[str, str]:
     for aff in data.get("affected") or []:
         for rng in aff.get("ranges") or []:
             repo = rng.get("repo") or ""
-            m = re.match(r"https?://github\.com/([^/]+/[^/#?\s.]+)", repo)
+            # Cap the slug capture at GitHub's own per-segment limit
+            # (39 chars for owner per docs, 100 chars for repo). Pre-fix
+            # `[^/]+` was unbounded — a malformed `repo` field that's
+            # several MB of attacker content with no `/` would force the
+            # engine to consume the whole string before declaring no
+            # match. Use {1,256} to keep room for unusual long names
+            # while bounding pathological input. The leading anchor
+            # `https?://github.com/` already filters most garbage; this
+            # is defence-in-depth.
+            m = re.match(
+                r"https?://github\.com/([^/]{1,256}/[^/#?\s.]{1,256})",
+                repo,
+            )
             slug = ""
             if m:
                 slug = m.group(1)
