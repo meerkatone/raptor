@@ -382,9 +382,22 @@ class DatabaseManager:
         processes (not threads) so this is fine in practice; a future
         thread-based caller would need a different staging key (e.g.,
         include thread.get_ident()).
+
+        Uniqueness suffix: PID alone is NOT sufficient when two writers
+        live in DIFFERENT PID namespaces (containers) but share a
+        bind-mounted db_root. Two containers can both report
+        `os.getpid() == 1` (their per-ns init) and silently collide on
+        `.staging-<language>-1`. Append a 4-byte random uniquifier so
+        cross-namespace writers stay isolated even if their PID
+        coincides. The `_gc_stale_markers` path globs `.staging-*` so
+        the trailing uniquifier doesn't break orphan cleanup.
         """
+        import secrets
         canonical = self.get_database_dir(repo_hash, language)
-        return canonical.parent / f".staging-{language}-{os.getpid()}"
+        return (
+            canonical.parent
+            / f".staging-{language}-{os.getpid()}-{secrets.token_hex(4)}"
+        )
 
     def _stale_marker_name(self, canonical: Path) -> str:
         """Build a unique stale-marker name for an evicted canonical.
