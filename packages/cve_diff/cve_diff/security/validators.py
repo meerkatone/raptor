@@ -18,7 +18,16 @@ from datetime import datetime
 
 from cve_diff.security.exceptions import ValidationError
 
-_CVE_ID_RE = re.compile(r"^CVE-(\d{4})-(\d{4,})$")
+# `\A` / `\Z` (matched via fullmatch below) instead of `^...$`. Pre-fix
+# `^CVE-...$` plus `re.match` would have accepted `"CVE-2023-1234\n"`
+# because `$` matches just before a trailing newline. The function
+# already strips whitespace and rejects mismatch on line 33-34, so the
+# bypass was defended-in-depth — but a maintainer who removed the
+# strip check (e.g. while refactoring towards "validate only, don't
+# mutate") would re-open the hole. Use `fullmatch` so the regex
+# itself enforces strict end-of-string and the strip check is
+# decoration rather than the only line of defence.
+_CVE_ID_RE = re.compile(r"CVE-(\d{4})-(\d{4,})", re.ASCII)
 _SQL_INJECT_TOKENS = ("'", '"', ";", "--", "/*", "*/", "DROP", "SELECT")
 
 
@@ -40,7 +49,7 @@ def validate_cve_id(cve_id: str) -> str:
     if ".." in cve_id or "/" in cve_id or "\\" in cve_id:
         raise ValidationError("CVE ID contains invalid characters (possible path traversal attempt)")
 
-    match = _CVE_ID_RE.match(cve_id)
+    match = _CVE_ID_RE.fullmatch(cve_id)
     if not match:
         if not cve_id.startswith("CVE-"):
             if cve_id.lower().startswith("cve-"):
