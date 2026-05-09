@@ -153,11 +153,21 @@ class DatabaseManager:
         version number, and either crashed or silently mismatched.
         """
         try:
+            # `env=RaptorConfig.get_safe_env()` so the version probe
+            # doesn't inherit the parent's env. Pre-fix the bare
+            # `subprocess.run` carried LD_PRELOAD / LD_LIBRARY_PATH /
+            # PYTHONPATH / etc. through to the codeql binary —
+            # codeql is a JVM launcher that respects JAVA_TOOL_OPTIONS
+            # and other JVM env vars (which can attach a Java agent
+            # at startup, equivalent to LD_PRELOAD for Java). Same
+            # env-hygiene posture as the database-creation Popen
+            # below.
             result = subprocess.run(
                 [self.codeql_cli, "version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=RaptorConfig.get_safe_env(),
             )
             if result.returncode == 0:
                 # Parse first dotted-version-shaped token from stdout.
