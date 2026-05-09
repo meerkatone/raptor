@@ -1236,14 +1236,35 @@ def _count_comment_lines_regex(content: str, language: str) -> int:
             if stripped.startswith("#"):
                 count += 1
         elif language in ("c", "cpp", "java", "javascript", "typescript", "go"):
-            if in_block:
-                count += 1
-                if "*/" in stripped:
+            # State-machine comment-walk per line so the in_block
+            # state tracks every `/*` open and `*/` close on the
+            # line, including the `*/ /* still open` shape where a
+            # line closes a block and immediately opens a new one.
+            # Pre-fix the simple `if "*/" in stripped` close-check
+            # missed the re-open: in_block became False at line end,
+            # then every subsequent code line (which was actually
+            # inside the new block) was mis-counted as code until
+            # the eventual real `*/` arrived. Wallclock-cheap: each
+            # line scan is O(line_length).
+            entered_in_block = in_block
+            i = 0
+            while i < len(stripped):
+                if in_block:
+                    j = stripped.find("*/", i)
+                    if j < 0:
+                        break
                     in_block = False
-            elif stripped.startswith("//"):
-                count += 1
-            elif stripped.startswith("/*"):
-                count += 1
-                if "*/" not in stripped:
+                    i = j + 2
+                else:
+                    j = stripped.find("/*", i)
+                    if j < 0:
+                        break
                     in_block = True
+                    i = j + 2
+            # Count the line iff it starts inside a block, starts
+            # with `//`, or starts with `/*`.
+            if (entered_in_block
+                or stripped.startswith("//")
+                or stripped.startswith("/*")):
+                count += 1
     return count
