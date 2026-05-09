@@ -321,10 +321,32 @@ class DefenseTelemetry:
             }
 
     def write_summary(self, output_dir: str | Path) -> Path:
-        """Write the summary to defense-telemetry.json in output_dir."""
+        """Write the summary to defense-telemetry.json in output_dir.
+
+        Atomic write: temp file + os.replace. Pre-fix
+        `path.write_text(...)` was non-atomic — a process killed
+        mid-write left the JSON file half-written. The downstream
+        consumer (orchestration report aggregation) then JSONDecode-
+        crashed on the partial file and either skipped the section
+        or aborted report generation. The atomic temp+rename pattern
+        guarantees consumers see either the OLD complete file or the
+        NEW complete file, never a truncated transition.
+        """
+        import os as _os
         path = Path(output_dir) / "defense-telemetry.json"
         data = self.summary()
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp = path.with_name(f"{path.name}.tmp.{_os.getpid()}")
+        try:
+            tmp.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8",
+            )
+            _os.replace(str(tmp), str(path))
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return path
 
     @property
