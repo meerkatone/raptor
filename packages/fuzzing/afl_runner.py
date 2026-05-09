@@ -661,11 +661,35 @@ class AFLRunner:
             if self.input_mode == "file" and test_input:
                 env['AFL_INPUT_FILE'] = str(test_input)
 
+            # Landlock readable_paths: afl-showmap needs to READ
+            # the target binary (self.binary) and the input
+            # corpus file (test_input). Both typically live
+            # OUTSIDE self.output_dir — the binary in the
+            # operator's build dir, the input under the project's
+            # corpus tree. Pre-fix the only readable+writable
+            # path was self.output_dir, so:
+            #
+            #   * afl-showmap couldn't open the binary →
+            #     "afl-showmap: cannot open binary" error,
+            #     coverage report empty, operators saw "0%
+            #     coverage" with no signal that landlock was the
+            #     blocker.
+            #   * AFL_INPUT_FILE pointed outside the readable
+            #     scope → afl-showmap couldn't read it either.
+            #
+            # Add binary parent + input parent to readable_paths
+            # so afl-showmap can open both. Output stays
+            # restricted to output_dir.
+            readable_paths = [str(Path(self.binary).parent)]
+            if test_input:
+                readable_paths.append(str(Path(test_input).parent))
+
             result = _sandbox_run(
                 showmap_cmd,
                 block_network=True,
                 target=str(self.output_dir),
                 output=str(self.output_dir),
+                readable_paths=readable_paths,
                 capture_output=True,
                 text=True,
                 stdin=stdin_input,
