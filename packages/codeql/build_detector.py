@@ -819,12 +819,40 @@ for i, src in enumerate(FILES):
             created_dirs.add(obj_dir)
         cmd = [COMPILER, "-w"] + FLAGS + ["-c", src, "-o", obj]
 
-    result = subprocess.run(cmd, stderr=subprocess.PIPE)
-    if result.returncode == 0:
+    # Per-compile stderr cap. Pre-fix `stderr=subprocess.PIPE`
+    # buffered the full stderr stream into the parent before
+    # returning — for C++ template-instantiation errors a
+    # SINGLE source file can produce tens of MB of stderr.
+    # Across hundreds of source files in a target, the script's
+    # RSS grew unbounded. Operators saw the build script
+    # OOM-killed mid-pass.
+    #
+    # Use Popen + bounded read(N) so each compile's stderr is
+    # capped at 256 KB — enough for a useful diagnostic
+    # excerpt, hard upper bound. Drain remaining bytes via
+    # /dev/null so the child can finish without SIGPIPE.
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+    _STDERR_CAP = 256 * 1024
+    captured = b""
+    if proc.stderr is not None:
+        captured = proc.stderr.read(_STDERR_CAP)
+        # Drain any remainder so the child unblocks on its
+        # next stderr write rather than hanging on a full
+        # pipe buffer (PIPE_BUF is 64 KB on Linux; without
+        # the drain, a child writing > 256 KB sleeps in
+        # write(2) waiting for a reader).
+        while proc.stderr.read(64 * 1024):
+            pass
+    proc.wait()
+    if proc.returncode == 0:
         ok += 1
     else:
         fail += 1
-        sys.stderr.buffer.write(result.stderr)
+        sys.stderr.buffer.write(captured)
+        if proc.stderr is not None and len(captured) >= _STDERR_CAP:
+            sys.stderr.buffer.write(
+                f"\\n[truncated to first {_STDERR_CAP // 1024} KB]\\n".encode()
+            )
 
 print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
 ''')
