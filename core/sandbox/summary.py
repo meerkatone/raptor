@@ -311,9 +311,33 @@ def summarize_and_write(run_dir: Path) -> Optional[Dict[str, Any]]:
     if not jsonl.exists():
         return None
 
+    # Rename-then-read pattern. Pre-fix the read-then-unlink sequence
+    # had a race: a writer (concurrent sandbox subprocess emitting a
+    # late denial) could append between the read and the unlink, and
+    # the unlink would drop that entry. Rename moves the directory
+    # entry atomically so any subsequent writer either creates a
+    # FRESH `.sandbox-denials.jsonl` (caught by the next
+    # `summarize_and_write` call) or appends to a path no longer
+    # bound to our inode.
+    #
+    # The tracer side appends with O_APPEND on the original path;
+    # POSIX guarantees O_APPEND opens resolve the path at write
+    # time, so a writer that opens AFTER our rename creates the new
+    # file. A writer that opened BEFORE rename keeps writing to our
+    # renamed inode (which we then unlink — those entries are lost,
+    # but they're a strictly small race window vs the bigger
+    # multi-second post-summary race the prior code had).
+    import os as _os
+    tmp = jsonl.with_name(f"{jsonl.name}.summarising.{_os.getpid()}")
+    try:
+        _os.replace(str(jsonl), str(tmp))
+    except OSError:
+        # Race lost (sibling already renamed) or jsonl disappeared.
+        return None
+
     denials = []
     try:
-        with open(jsonl, "r", encoding="utf-8") as f:
+        with open(tmp, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -323,13 +347,19 @@ def summarize_and_write(run_dir: Path) -> Optional[Dict[str, Any]]:
                 except json.JSONDecodeError:
                     continue  # skip malformed lines, keep going
     except OSError:
-        return None
-
-    if not denials:
         try:
-            jsonl.unlink()
+            tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        return None
+
+    # tmp file's data is now in memory; remove it.
+    try:
+        tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    if not denials:
         return None
 
     # Enrich tracer-emitted records with `suggested_fix` if they lack it
@@ -377,12 +407,12 @@ def summarize_and_write(run_dir: Path) -> Optional[Dict[str, Any]]:
             pass
         return None
 
-    # Remove the intermediate JSONL — summary supersedes it.
-    try:
-        jsonl.unlink()
-    except OSError:
-        pass
-
+    # The intermediate JSONL was already renamed-and-unlinked above
+    # (see the rename-then-read pattern at the start of the
+    # function). Nothing to clean up here. The bare `jsonl.unlink()`
+    # that lived here pre-fix was redundant after the rename and
+    # would always OSError now (caught by the swallow); keeping the
+    # comment marker for clarity.
     return summary
 
 
