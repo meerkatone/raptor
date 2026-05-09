@@ -631,8 +631,23 @@ def _check_diff_shape_impl(slug: str, sha: str) -> str:
 
 
 def _http_fetch_impl(url: str) -> str:
+    # Two-stage URL guard:
+    #   1. Scheme prefix — `re.match(r"^https?://", ...)` only
+    #      validated the SCHEME, not the rest of the URL. A
+    #      well-formed-looking URL with embedded `\r\n` (CRLF)
+    #      passed the prefix check, then flowed into urllib's
+    #      `Request(url)` where the embedded newline could be
+    #      interpreted as header termination — HTTP request
+    #      smuggling / header injection.
+    #   2. Reject control bytes anywhere in the URL. The URL
+    #      should be all printable ASCII per RFC 3986; any
+    #      0x00-0x1F or 0x7F char is non-conformant. Rejecting
+    #      them at the entry point closes the CRLF window
+    #      regardless of what the underlying HTTP client does.
     if not url or not re.match(r"^https?://", url):
         return _err("http(s) url required")
+    if any(c in url for c in "\x00\r\n\t\x0b\x0c"):
+        return _err("url contains control characters (CRLF / NUL / etc.)")
     try:
         body_bytes = _forge_client().get_bytes(
             url, timeout=int(_TIMEOUT_S), max_bytes=_MAX_BYTES, retries=0,
