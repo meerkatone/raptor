@@ -997,8 +997,22 @@ class DatabaseManager:
             )
 
         finally:
-            if build_script and build_script.exists():
-                build_script.unlink()
+            # build_script unlink: missing_ok=True so a script that
+            # was already cleaned up by an earlier branch (or that
+            # never landed on disk because mkstemp succeeded but
+            # write_text raised) doesn't crash the cleanup. Pre-fix
+            # `build_script.unlink()` raised FileNotFoundError when
+            # the success path had already deleted the script, AND
+            # raised PermissionError if the script's parent dir got
+            # mounted noexec/readonly mid-build (rare but observed
+            # on some CI runners). Either case took the cleanup
+            # exception out of `finally:` and skipped the staging
+            # rmtree below.
+            if build_script:
+                try:
+                    build_script.unlink(missing_ok=True)
+                except OSError as _bs_err:
+                    logger.debug(f"build_script unlink failed: {_bs_err}")
             # Belt-and-braces staging cleanup for timeout / unhandled exception
             # paths that bypass the success/failure cleanup branches above.
             # Skip if we ended up using staging as final_path (the fallback
