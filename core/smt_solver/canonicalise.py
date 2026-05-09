@@ -122,7 +122,22 @@ def canonicalise(text: str) -> str:
     the multi-condition structure intact. Internal multi-space
     runs from rewrite expansion still collapse fine.
     """
-    out = text
+    # Cap input length before the per-pattern loop. Pre-fix the
+    # `for pat, repl in _REWRITES: out = pat.sub(repl, out)` loop
+    # ran ~20 patterns sequentially over the WHOLE input string —
+    # O(20*N) work for an N-byte input. Real condition strings
+    # passed to canonicalise() are short (a single boolean
+    # expression, low-KB at most), but a hostile / corrupt
+    # caller passing a multi-MB blob would burn proportional
+    # wallclock per call. 256 KB cap is two orders of magnitude
+    # beyond any realistic condition; oversized input is
+    # almost certainly an upstream bug rather than legitimate
+    # data, so truncating is the safer mode than chewing through
+    # it. Truncate from the END (keep the head) — the leading
+    # part of a condition is the part the rewrites actually
+    # care about.
+    _CANONICALISE_INPUT_CAP = 256 * 1024
+    out = text if len(text) <= _CANONICALISE_INPUT_CAP else text[:_CANONICALISE_INPUT_CAP]
     for pat, repl in _REWRITES:
         out = pat.sub(repl, out)
     return _WHITESPACE_RUN.sub(' ', out).strip()
