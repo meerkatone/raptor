@@ -654,8 +654,24 @@ def parse_timestamp_from_name(name: str) -> Optional[str]:
     - scan_vulns_20260406_100000
     - exploitability-validation-20260406-100000
     """
+    # `re.ASCII` so `\d` matches only ASCII digits. Pre-fix `\d` was
+    # Unicode-aware by default, admitting Devanagari / Arabic-Indic
+    # / fullwidth digit characters. A directory named with mixed
+    # ASCII + Unicode digits (rare but possible if an operator
+    # copies a path through a tool that re-encodes glyphs, or a
+    # CI-system-generated name templates with locale-aware
+    # formatting) would parse via `int(y)` — which DOES accept
+    # Unicode digits and produces the corresponding integer value.
+    # The directory name then "looks like" a timestamp the parser
+    # accepts, even though grep / human-readable filtering treats
+    # the chars as different. Anchoring to ASCII keeps the
+    # timestamp-parsed-from-name <-> timestamp-rendered-to-name
+    # mapping deterministic.
     # Look for YYYYMMDD_HHMMSS or YYYYMMDD-HHMMSS
-    match = re.search(r'(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})', name)
+    match = re.search(
+        r'(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})',
+        name, re.ASCII,
+    )
     if match:
         y, mo, d, h, mi, s = match.groups()
         try:
@@ -665,7 +681,7 @@ def parse_timestamp_from_name(name: str) -> Optional[str]:
             pass
 
     # Look for YYYYMMDD only
-    match = re.search(r'(\d{4})(\d{2})(\d{2})', name)
+    match = re.search(r'(\d{4})(\d{2})(\d{2})', name, re.ASCII)
     if match:
         y, mo, d = match.groups()
         try:
