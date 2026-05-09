@@ -1077,8 +1077,23 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
                     logger.debug("CC output wasn't valid JSON")
                     return None
 
-            includes = self._validate_flags(data.get("includes", []))
-            defines = self._validate_flags(data.get("defines", []))
+            # Pre-fix `data.get("includes", [])` returned the
+            # default `[]` only when the key was MISSING. If the
+            # CC LLM emitted `{"includes": null, "defines": null}`
+            # (common when the model thought "no useful suggestion"
+            # and serialised null instead of an empty array), the
+            # `.get("includes", [])` returned None, and
+            # `_validate_flags(None)` crashed with `TypeError:
+            # 'NoneType' object is not iterable`. Coerce explicit
+            # null to [] in addition to the missing-key default.
+            #
+            # Real failure mode: a quiet json-from-CC failure
+            # turned into a Python traceback aborting the whole
+            # heuristic-build flow, where the right behaviour is
+            # to log "no flags suggested" and proceed with the
+            # base build.
+            includes = self._validate_flags(data.get("includes") or [])
+            defines = self._validate_flags(data.get("defines") or [])
 
             if includes or defines:
                 logger.info(f"  CC suggested {len(includes)} includes, {len(defines)} defines")
