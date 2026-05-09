@@ -416,7 +416,8 @@ class UrllibClient:
         # Validation runs at call time; the generator below runs at
         # iteration time. Splitting them ensures URL errors fail fast
         # instead of waiting for the first .next() call.
-        return self._stream(url, merged, effective_timeout, max_bytes)
+        return self._stream(url, merged, effective_timeout, max_bytes,
+                            wallclock_cap=total_timeout)
 
     def _stream(
         self,
@@ -424,6 +425,7 @@ class UrllibClient:
         headers: Dict[str, str],
         timeout: int,
         max_bytes: int,
+        wallclock_cap: int = None,
     ) -> Iterator[bytes]:
         resp = self._http.request(
             "GET", url,
@@ -447,6 +449,23 @@ class UrllibClient:
                     f"{reason} {snippet!r}"[:200],
                     status=resp.status,
                 )
+            # Pre-fix the loop honoured ``timeout`` for the
+            # initial connect+read but had NO wall-clock cap on
+            # the streamed body. A slowloris-style server that
+            # trickled bytes (1 byte every 5 seconds, never
+            # idle long enough to trip the per-read timeout)
+            # held the connection open indefinitely. Operators
+            # waiting on the iterator saw "stream stalled"
+            # with no signal to abort.
+            #
+            # Apply ``wallclock_cap`` (passed from the caller's
+            # ``total_timeout``) as a hard ceiling on total
+            # generator lifetime. Aborts with TimeoutError if
+            # the stream takes longer than the cap, matching
+            # the documented contract that ``total_timeout``
+            # bounds the END-TO-END operation.
+            import time as _time
+            _start = _time.monotonic()
             total = 0
             for chunk in resp.stream(64 * 1024, decode_content=True):
                 total += len(chunk)
@@ -454,6 +473,13 @@ class UrllibClient:
                     raise SizeLimitExceeded(
                         f"Stream from {_safe_url_for_log(url)} "
                         f"exceeded {max_bytes} bytes",
+                    )
+                if (wallclock_cap is not None
+                        and _time.monotonic() - _start > wallclock_cap):
+                    raise TimeoutError(
+                        f"Stream from {_safe_url_for_log(url)} exceeded "
+                        f"wallclock cap of {wallclock_cap}s "
+                        f"(slowloris defence)"
                     )
                 yield chunk
         finally:
