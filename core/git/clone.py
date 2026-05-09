@@ -163,6 +163,38 @@ def _validate_writable_path(p: Path, *, role: str) -> None:
             f"paths are unsafe here — the sandbox writable scope "
             f"({role}.parent) would be cwd-dependent."
         )
+    # Pre-fix the validator only refused root and direct-children-of-
+    # root. It silently accepted paths under sensitive system mounts:
+    #
+    #   /dev/shm/foo       — tmpfs visible to all users on the host;
+    #                        a hostile git server cloning into
+    #                        /dev/shm/x can plant attacker-readable
+    #                        files in another user's environment.
+    #   /proc/<pid>/...    — kernel-managed pseudo-fs; writes here
+    #                        either no-op or modify process state
+    #                        (cgroup membership, oom_adj, etc.).
+    #                        Sandbox carving a writable hole into
+    #                        /proc is meaningless at best and
+    #                        privilege-escalation at worst.
+    #   /sys/...           — same as /proc; kernel-managed and
+    #                        denylist on principle.
+    #   /run/...           — runtime state (PID files, sockets);
+    #                        sandbox writes here can collide with
+    #                        systemd / docker / similar.
+    #
+    # Reject these prefixes outright. Operator-legitimate sandbox
+    # work belongs under /tmp, /var/tmp, $HOME, or a dedicated
+    # workspace — not in system pseudo-fs locations.
+    _str = str(p)
+    _DENY_PREFIXES = ("/dev/", "/proc/", "/sys/", "/run/")
+    for prefix in _DENY_PREFIXES:
+        if _str.startswith(prefix) or _str == prefix.rstrip("/"):
+            raise ValueError(
+                f"{role}={str(p)!r} is under a system pseudo-fs prefix "
+                f"({prefix}); refusing to grant the sandbox write "
+                f"access. Use /tmp, /var/tmp, $HOME, or a dedicated "
+                f"workspace path instead."
+            )
     # Two checks against root, both required:
     #
     # 1. The RESOLVED form catches `/tmp/work -> /` symlink attacks
