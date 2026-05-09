@@ -115,15 +115,23 @@ class DatabaseManager:
         return [str(Path(self.codeql_cli).resolve().parent)]
 
     def _detect_codeql_cli(self) -> Optional[str]:
-        """Detect CodeQL CLI path."""
+        """Detect CodeQL CLI path.
+
+        `os.access(path, X_OK)` instead of bare `Path.exists()`. Pre-fix
+        the env-var path was accepted as long as the file existed —
+        `CODEQL_CLI=/etc/passwd` would have us shell out to a non-
+        executable file, which then raised OSError at subprocess.run
+        with a confusing stderr instead of failing the detection
+        cleanly.
+        """
         import os
 
         # Check environment variable
         env_cli = os.environ.get("CODEQL_CLI")
-        if env_cli and Path(env_cli).exists():
+        if env_cli and os.access(env_cli, os.X_OK):
             return env_cli
 
-        # Check PATH
+        # Check PATH (shutil.which already requires X_OK)
         cli_path = shutil.which("codeql")
         if cli_path:
             return cli_path
@@ -131,7 +139,19 @@ class DatabaseManager:
         return None
 
     def get_codeql_version(self) -> Optional[str]:
-        """Get CodeQL version."""
+        """Get CodeQL version.
+
+        Returns the dotted-version number (e.g. ``"2.16.4"``) extracted
+        from `codeql version` output, or None on failure. Pre-fix the
+        function returned the WHOLE first line, which on modern CodeQL
+        looks like::
+
+            CodeQL command-line toolchain release 2.16.4.
+
+        Callers comparing against version strings (semver, regex
+        `\\d+\\.\\d+`) then matched against the trailing prose, not the
+        version number, and either crashed or silently mismatched.
+        """
         try:
             result = subprocess.run(
                 [self.codeql_cli, "version"],
@@ -140,9 +160,16 @@ class DatabaseManager:
                 timeout=10,
             )
             if result.returncode == 0:
-                # Parse version from output (first line usually contains version)
-                version = result.stdout.strip().split('\n')[0]
-                return version
+                # Parse first dotted-version-shaped token from stdout.
+                # `re.ASCII` so Unicode digits don't sneak in (see
+                # packages/exploit_feasibility/profiles.py for the same
+                # rationale applied to glibc parsing).
+                m = re.search(r'\d+(?:\.\d+){1,3}', result.stdout, re.ASCII)
+                if m:
+                    return m.group(0)
+                # Fallback for unexpected output: return first line so
+                # operators still see SOMETHING in logs/banners.
+                return result.stdout.strip().split('\n')[0] or None
             return None
         except Exception as e:
             logger.warning(f"Failed to get CodeQL version: {e}")
