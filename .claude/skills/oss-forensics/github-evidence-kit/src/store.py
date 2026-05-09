@@ -139,9 +139,25 @@ class EvidenceStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_json())
 
+    # Cap on JSON-string input. Pre-fix `from_json` accepted any
+    # length string. A hostile or corrupted evidence file (a 10 GB
+    # JSON dump misnamed, an attacker-supplied payload routed
+    # through a CI artifact ingest, a malformed recovery dump) would
+    # OOM the process during `json.loads`'s parse. Real evidence
+    # bundles top out at low MB (the largest pinned-evidence forensic
+    # report observed in the wild is ~8 MB); 100 MB cap leaves 10x
+    # headroom while bounding pathological input.
+    _FROM_JSON_MAX_BYTES = 100 * 1024 * 1024
+
     @classmethod
     def from_json(cls, json_str: str) -> "EvidenceStore":
         """Create store from JSON string."""
+        if len(json_str) > cls._FROM_JSON_MAX_BYTES:
+            raise ValueError(
+                f"EvidenceStore.from_json: input exceeds "
+                f"{cls._FROM_JSON_MAX_BYTES} bytes — refusing to load "
+                f"(pathological input bounds enforced)"
+            )
         from . import load_evidence_from_json
         data = json.loads(json_str)
         return cls([load_evidence_from_json(item) for item in data])
