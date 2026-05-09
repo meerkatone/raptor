@@ -914,8 +914,31 @@ def _references_file(entry: Dict[str, Any], stale_files: Set[str]) -> bool:
         val = entry.get(field, "")
         if not isinstance(val, str) or not val:
             continue
-        # Extract all "word.ext:digits" tokens (filenames with line numbers)
-        for match in re.findall(r'[\w./+-]+\.\w+(?=:\d)', val):
+        # Extract all "word.ext:digits" tokens (filenames with line numbers).
+        #
+        # Pre-fix the pattern was `[\w./+-]+\.\w+(?=:\d)` without
+        # `re.ASCII`. Python `\w` defaults to Unicode-aware match,
+        # so a path containing Cyrillic, Arabic, CJK, etc. characters
+        # was tokenised as a "filename" — but `stale_files` is a
+        # set populated from the on-disk extractor (ASCII-encoded
+        # POSIX paths). The match against `stale_files` then
+        # fell through silently because the Unicode-tokenised
+        # path string never equaled the ASCII canonical form,
+        # leaving the entry as "not stale" when it actually was.
+        #
+        # Symptom: /understand JSON containing target paths with
+        # non-ASCII characters (multi-locale codebases, Asian /
+        # Slavic projects, intentionally-Unicode test fixtures)
+        # treated stale-file matches as misses, leaving stale
+        # references in the bridged context map.
+        #
+        # `re.ASCII` makes `\w` match ONLY [a-zA-Z0-9_], aligning
+        # with the on-disk path tokenisation. Length cap added
+        # at the same time — operator-edited JSON containing a
+        # giant single token (broken JSON serialiser, included
+        # base64) would re-scan repeatedly across all val
+        # occurrences.
+        for match in re.findall(r'[\w./+-]{1,1024}\.\w{1,32}(?=:\d)', val, flags=re.ASCII):
             if match in stale_files:
                 return True
 
