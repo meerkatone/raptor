@@ -645,6 +645,22 @@ def main():
     }
     for p in find_dependency_files(repo):
         entry = {'path': str(p)}
+        # Race: between `find_dependency_files` enumeration and
+        # this parse, the file may have been deleted (concurrent
+        # `git checkout`, target rebuild, operator cleanup). Each
+        # parser handles missing-file differently:
+        # `parse_package_json` returns `{'error': 'package.json
+        # not found at ...'}` (post-S15 fix); `parse_pom` raises
+        # FileNotFoundError caught by its outer except as
+        # `{'error': str(e)}`; `parse_requirements` raises and
+        # the exception escapes. Pre-flight the existence check
+        # so the error envelope is uniform across all three
+        # parsers.
+        if not p.exists():
+            entry['error'] = f'file vanished between discovery and parse: {p}'
+            entry['deps'] = []
+            out['files'].append(entry)
+            continue
         if p.name == 'pom.xml':
             _result = parse_pom(p)
             # Surface parse_pom's error-on-failure dict contract via
