@@ -518,10 +518,29 @@ def ls_remote(
     if not parsed.hostname:
         raise ValueError(f"ls_remote: URL has no hostname: {url!r}")
 
+    # IDNA round-trip on the hostname for canonicalisation. Pre-fix
+    # `parsed.hostname.lower()` worked for ASCII hosts but missed
+    # internationalised domain names. URL `https://пример.рф/...`
+    # has parsed.hostname == "xn--e1afmkfd.xn--p1ai" already (urllib
+    # canonicalises to punycode) — but a URL `https://Пример.рф/`
+    # (mixed-case Cyrillic) parses to "пример.рф" (lower-cased
+    # Cyrillic), which doesn't match a punycode allowlist entry
+    # `xn--e1afmkfd.xn--p1ai`. The IDNA encode normalises to the
+    # canonical punycode form so the allowlist comparison is
+    # reliable across both ASCII and IDN inputs.
+    host_raw = parsed.hostname.lower()
+    try:
+        host = host_raw.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        # Hostname not encodable — operator may have provided a
+        # malformed value; fall back to the lowered original so
+        # the explicit allowlist mismatch error fires below
+        # rather than crashing here.
+        host = host_raw
+
     # Pre-check the hostname is in the supplied allowlist. The proxy
     # enforces too — this is defence-in-depth and a clearer error
     # before the subprocess fires.
-    host = parsed.hostname.lower()
     allowed_lower = {h.lower() for h in proxy_host_list}
     if host not in allowed_lower:
         raise ValueError(
