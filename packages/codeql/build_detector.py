@@ -777,6 +777,23 @@ Tolerates individual compilation failures.
 """
 import os, subprocess, sys
 
+# Strip dynamic-loader injection vars from the env we pass to each
+# compile subprocess. CodeQL's tracer wraps the build script with
+# its own preload library to capture compiler invocations; the
+# script itself shouldn't FORWARD a parent's LD_PRELOAD /
+# LD_LIBRARY_PATH / DYLD_* / PYTHONPATH (or other code-injection
+# vars) to gcc/javac, which would then attach attacker code at
+# every compile step. Build a one-shot scrubbed env here; reuse
+# across the per-file loop.
+_SCRUB_ENV_VARS = (
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    "PYTHONPATH", "PYTHONSTARTUP",
+    "BASH_ENV", "ENV",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+)
+_BUILD_ENV = {{k: v for k, v in os.environ.items() if k not in _SCRUB_ENV_VARS}}
+
 COMPILER = {compiler!r}
 FLAGS = {(include_flags + define_flags)!r}
 BUILD_DIR = {str(build_dir)!r}
@@ -831,7 +848,7 @@ for i, src in enumerate(FILES):
     # capped at 256 KB — enough for a useful diagnostic
     # excerpt, hard upper bound. Drain remaining bytes via
     # /dev/null so the child can finish without SIGPIPE.
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, env=_BUILD_ENV)
     _STDERR_CAP = 256 * 1024
     captured = b""
     if proc.stderr is not None:
