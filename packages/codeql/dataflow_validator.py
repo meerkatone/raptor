@@ -431,8 +431,34 @@ class DataflowValidator:
                     resolved.relative_to(repo_root.resolve())
                 except ValueError:
                     return ""
+            # Cap the source-context read at 10 MB. Pre-fix
+            # `open(...).readlines()` had no upper bound — a
+            # source file > 10 MB (auto-generated lexer tables,
+            # vendored library bundles, single-file compiled JS
+            # blobs) was loaded entirely into memory just to
+            # extract a ~20-line window around `line`.
+            #
+            # 10 MB covers every legitimate human-authored
+            # source file by orders of magnitude (Linux kernel
+            # ~10 MB across ALL files; the largest single C
+            # file ever observed in a major OSS project is
+            # ~3 MB). For pathological files past the cap the
+            # function still produces a context window — just
+            # truncated to the first 10 MB worth of lines.
+            _MAX_SOURCE_BYTES = 10 * 1024 * 1024
             with open(resolved) as f:
-                lines = f.readlines()
+                content = f.read(_MAX_SOURCE_BYTES + 1)
+            if len(content) > _MAX_SOURCE_BYTES:
+                # Drop the trailing partial line (avoids splitting
+                # in the middle of a token in the rendered context)
+                content = content[:_MAX_SOURCE_BYTES]
+                content = content.rsplit("\n", 1)[0] + "\n"
+                self.logger.warning(
+                    f"Source file {resolved} exceeded "
+                    f"{_MAX_SOURCE_BYTES}-byte cap; context window "
+                    f"reflects truncated read"
+                )
+            lines = content.splitlines(keepends=True)
 
             start = max(0, line - context_lines - 1)
             end = min(len(lines), line + context_lines)
