@@ -25,12 +25,20 @@ fi
 
 # Resolve symlinks so RAPTOR_DIR is correct even when this wrapper is
 # symlinked into ~/bin or similar (matches bin/raptor's behaviour).
+# Hop bound — see raptor-cc-trust-check for the symlink-cycle rationale.
 SCRIPT="$0"
+_symhops=0
 while [ -L "$SCRIPT" ]; do
+    _symhops=$((_symhops + 1))
+    if [ "$_symhops" -gt 32 ]; then
+        echo "raptor-agentic: symlink hop limit exceeded resolving $0" >&2
+        exit 1
+    fi
     DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
     SCRIPT="$(readlink "$SCRIPT")"
     [[ "$SCRIPT" != /* ]] && SCRIPT="$DIR/$SCRIPT"
 done
+unset _symhops
 RAPTOR_DIR="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
 
 # Strip env vars that could inject code into the Python process.

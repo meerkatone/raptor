@@ -125,12 +125,29 @@ fi
 
 # Resolve symlinks to find the real script location — matches bin/raptor's pattern
 # so packagers can safely symlink this wrapper from PATH locations.
+#
+# Hop bound: pre-fix `while [ -L "$SCRIPT" ]` had no termination
+# guard. A symlink cycle (A → B → A) — easy to create accidentally
+# during install scripting, or maliciously via a poisoned ~/bin
+# layout — would loop forever. POSIX `realpath -e` would normally
+# detect ELOOP, but we can't rely on it (BSD vs GNU realpath differ
+# and the canonical pattern across raptor/* is the manual loop).
+# 32 hops matches Linux's MAXSYMLINKS (8 nested chains × redundancy);
+# real package layouts rarely exceed 2-3 hops.
 SCRIPT="$0"
+_symhops=0
 while [ -L "$SCRIPT" ]; do
+    _symhops=$((_symhops + 1))
+    if [ "$_symhops" -gt 32 ]; then
+        echo "raptor-cc-trust-check: symlink hop limit exceeded resolving $0" >&2
+        echo "  (likely a symlink cycle; refusing to resolve further)" >&2
+        exit 3
+    fi
     DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
     SCRIPT="$(readlink "$SCRIPT")"
     [[ "$SCRIPT" != /* ]] && SCRIPT="$DIR/$SCRIPT"
 done
+unset _symhops
 RAPTOR_DIR="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
 
 if ! command -v python3 >/dev/null 2>&1; then
