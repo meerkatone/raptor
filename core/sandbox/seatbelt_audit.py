@@ -253,6 +253,18 @@ class LogStreamer:
             # Buffering: line-buffered so we get records as they
             # arrive rather than accumulating in a 4K pipe buffer.
             bufsize=1,
+            # `start_new_session=True` so a Ctrl-C delivered to the
+            # parent's terminal session doesn't propagate SIGINT to
+            # the `log stream` subprocess via the shared controlling
+            # terminal. Pre-fix the audit streamer died on the
+            # operator's first Ctrl-C — even though the parent's
+            # KeyboardInterrupt handler was structured to terminate
+            # it explicitly via `_proc.terminate()` later, the
+            # SIGINT got there first and left the log records
+            # un-collected for the killed run. Detached session
+            # ensures the parent's Ctrl-C handler controls the
+            # streamer's lifecycle.
+            start_new_session=True,
         )
         try:
             attached = self._warm_up_until_attached()
@@ -311,6 +323,11 @@ class LogStreamer:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # Detach from parent's terminal session — see the
+                # streamer Popen above for the same rationale.
+                # Operator Ctrl-C shouldn't kill our own warm-up
+                # probe; the probe finishes on its own.
+                start_new_session=True,
             )
         except OSError:
             return False
