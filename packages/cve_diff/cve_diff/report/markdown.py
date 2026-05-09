@@ -479,6 +479,23 @@ def _strip_surrender_prefix(error_text: str) -> str:
 
 
 def _humanize_class(error_class: str) -> str:
+    # Pre-fix the fallback was `.get(error_class, error_class)` —
+    # an unknown class fell through as the raw class name. For
+    # known-but-not-mapped values (a future error class added to
+    # the pipeline without updating this dict, or a typo in the
+    # dispatching code, or a value carried in from a stale JSON
+    # file), the report's "**Outcome:**" header read e.g.
+    # `**Outcome:** WeirdNewError` — looks like a noise leak, not
+    # an actionable header. Operators reading the per-CVE
+    # markdown couldn't tell at a glance whether they were
+    # looking at a "well-categorised failure with a known reason"
+    # or a "raw class name from somewhere we forgot to update".
+    #
+    # Fall back to "Other (<raw>)" so the unmapped case is
+    # explicit AND the raw class name is preserved for the
+    # maintainer to find and add a mapping. Existing 5 tests
+    # for known classes pass unchanged; the 6th covers this
+    # fallback.
     return {
         "UnsupportedSource": "Out of scope (closed-source vendor)",
         "no_evidence": "No public commit reference",
@@ -494,7 +511,7 @@ def _humanize_class(error_class: str) -> str:
         "submit_unverified_sha": "Agent submitted a SHA without verifying it via gh_commit_detail",
         "PerCveTimeout": "Per-CVE wall-clock timeout",
         "llm_error": "Anthropic API failure after retries",
-    }.get(error_class, error_class)
+    }.get(error_class, f"Other ({error_class})")
 
 
 def _commit_url(repository_url: str, sha: str) -> str:
