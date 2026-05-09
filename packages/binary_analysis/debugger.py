@@ -96,6 +96,20 @@ class GDBDebugger:
         )
         script_file = Path(script_name)
         os.close(fd)
+        # mkstemp defaults to 0o600 on POSIX, but "defaults to" is a
+        # platform contract that has shifted on edge cases (a custom
+        # umask, a broken libc fallback, a future Python release that
+        # changes the policy). The script may contain operator-supplied
+        # GDB commands that we don't want world-readable on a shared
+        # host even briefly. Set the mode explicitly so the protection
+        # holds regardless of platform defaults.
+        try:
+            os.chmod(script_file, 0o600)
+        except OSError:
+            # Some non-Unix filesystems (FAT mounted /tmp on a USB,
+            # Windows path under WSL) don't support POSIX modes;
+            # the chmod failure isn't fatal.
+            pass
         try:
             script_file.write_text(gdb_script)
         except BaseException:
