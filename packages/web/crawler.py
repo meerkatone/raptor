@@ -145,12 +145,51 @@ class WebCrawler:
         logger.info(f"Starting crawl from {self._crawl_log_label(start_url)}")
 
         self.discovered_urls.add(start_url)
-        self._crawl_recursive(start_url, depth=0)
+
+        # Iterative BFS via an explicit work queue. Pre-fix this
+        # called `_crawl_recursive(start_url, depth=0)` which
+        # recursed into every discovered child. With Python's
+        # default recursion limit of 1000 and a deep linked
+        # site (e.g. a paginated forum or doc tree where each
+        # page links to the next), the crawl crashed with
+        # `RecursionError: maximum recursion depth exceeded`
+        # at the worst possible moment — well into a long
+        # crawl, with all discovered_* state thrown away on
+        # the unwind. Operators saw "web crawl failed
+        # mid-run" with no per-URL diagnostic.
+        #
+        # The recursion-bounding controls (`max_depth=3`,
+        # `max_pages=100`) helped under default config, but
+        # operators routinely override `--max-depth 10` for
+        # exhaustive scans, putting them well into stack-
+        # exhaustion territory.
+        #
+        # Use an explicit FIFO queue. `_crawl_recursive` now
+        # acts as a single-page-fetch helper; the BFS loop
+        # below drives multiple passes.
+        from collections import deque
+        queue: "deque[tuple[str, int]]" = deque([(start_url, 0)])
+        while queue:
+            if len(self.visited_urls) >= self.max_pages:
+                logger.info(f"Max pages limit reached ({self.max_pages})")
+                break
+            url, depth = queue.popleft()
+            self._crawl_recursive(url, depth, _queue=queue)
 
         return self.get_results()
 
-    def _crawl_recursive(self, url: str, depth: int) -> None:
-        """Recursively crawl pages."""
+    def _crawl_recursive(self, url: str, depth: int, _queue=None) -> None:
+        """Crawl a single page; enqueue discovered child URLs onto _queue.
+
+        Despite the name (preserved for backwards-compat with
+        any test that mocks it), this no longer recurses —
+        `crawl()` drives the BFS with an explicit work queue
+        and calls this once per popped URL. The `_queue`
+        kwarg is the BFS queue from `crawl()`; child URLs go
+        on it instead of being recursed into. When called
+        without `_queue` (legacy callers), the function still
+        does the per-page work but doesn't expand further.
+        """
         if depth > self.max_depth:
             logger.debug(f"Max depth reached for {self._crawl_log_label(url)}")
             return
@@ -169,12 +208,32 @@ class WebCrawler:
         )
 
         try:
-            # Fetch page
-            parsed_url = urlparse(url)
-            path = parsed_url.path + (
-                f"?{parsed_url.query}" if parsed_url.query else ""
-            )
-            response = self.client.get(path)
+            # Fetch page. Pre-fix the crawler stripped the URL to
+            # path+query only:
+            #
+            #   parsed_url = urlparse(url)
+            #   path = parsed_url.path + (?{query} if query else "")
+            #   response = self.client.get(path)
+            #
+            # That LOST the original host/scheme. WebClient._build_url
+            # then `urljoin(base_url + '/', path)` re-anchored every
+            # discovered URL onto base_url's host. Concrete failure
+            # mode: a discovered link
+            # `https://api.example.com/v1/users` (a sub-host the
+            # operator wanted in scope, e.g. assets.example.com or
+            # api.example.com under the same TARGET) was crawled as
+            # `<base_url>/v1/users` — wrong host, hits the wrong
+            # service, gets a 404 or worse cross-host data, and the
+            # actual sub-host endpoint is NEVER fetched even though
+            # the crawler thinks it covered it.
+            #
+            # Pass the full URL. `WebClient._build_url(url)` does
+            # `urljoin(base_url+'/', url)` which preserves the
+            # scheme/host when `url` is already absolute, then
+            # `_is_in_scope(url)` rejects out-of-origin URLs with
+            # ValueError — the crawl-scope check still fires, AND
+            # the correct host is hit when the URL is in-scope.
+            response = self.client.get(url)
 
             if response.status_code != 200:
                 logger.debug(
@@ -189,7 +248,7 @@ class WebCrawler:
             if "application/json" in content_type:
                 self._process_json_response(url, response)
             elif "text/html" in content_type:
-                self._process_html_response(url, response, depth)
+                self._process_html_response(url, response, depth, _queue=_queue)
             else:
                 logger.debug(f"Skipping non-HTML/JSON content: {content_type}")
 
@@ -198,8 +257,15 @@ class WebCrawler:
                 f"Error crawling {self._crawl_log_label(url)}: {type(e).__name__}"
             )
 
-    def _process_html_response(self, url: str, response, depth: int) -> None:
-        """Process HTML response to discover links, forms, etc."""
+    def _process_html_response(self, url: str, response, depth: int, _queue=None) -> None:
+        """Process HTML response to discover links, forms, etc.
+
+        `_queue` is the BFS work queue from `crawl()`; when
+        provided, discovered in-scope URLs go on it for later
+        processing instead of being recursed into. None for
+        legacy callers (no further crawl, just per-page
+        discovery).
+        """
         try:
             from bs4 import BeautifulSoup
 
@@ -233,8 +299,10 @@ class WebCrawler:
                         params = parse_qs(parsed.query)
                         self.discovered_parameters.update(params.keys())
 
-                    # Crawl this URL
-                    self._crawl_recursive(absolute_url, depth + 1)
+                    # Enqueue for the BFS loop (or fall through
+                    # if no queue — legacy single-page caller).
+                    if _queue is not None and absolute_url not in self.visited_urls:
+                        _queue.append((absolute_url, depth + 1))
 
             # Discover forms
             for form in soup.find_all("form"):

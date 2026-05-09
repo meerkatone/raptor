@@ -733,12 +733,24 @@ def sanitize_finding_for_display(finding: Dict[str, Any]) -> Dict[str, Any]:
     """
     sanitized = finding.copy()
 
-    # Truncate long snippets
-    if "snippet" in sanitized and len(sanitized["snippet"]) > 500:
-        sanitized["snippet"] = sanitized["snippet"][:497] + "..."
+    # Truncate long snippets.
+    #
+    # Pre-fix the gates were `if "X" in sanitized and len(...)`,
+    # treating "key present" as "value is a string" — but a SARIF
+    # finding can carry `{"snippet": null}` or `{"message": null}`
+    # explicitly (some tools serialise unset fields as null
+    # rather than omitting them). `len(None)` then crashed with
+    # TypeError, dropping the whole finding from the sanitised
+    # output and leaving the operator's report short by one
+    # entry per finding-with-null-message. Add isinstance
+    # guards so the truncation only fires when the value
+    # actually IS a string.
+    snippet = sanitized.get("snippet")
+    if isinstance(snippet, str) and len(snippet) > 500:
+        sanitized["snippet"] = snippet[:497] + "..."
 
-    # Truncate long messages
-    if "message" in sanitized and len(sanitized["message"]) > 200:
-        sanitized["message"] = sanitized["message"][:197] + "..."
+    message = sanitized.get("message")
+    if isinstance(message, str) and len(message) > 200:
+        sanitized["message"] = message[:197] + "..."
 
     return sanitized

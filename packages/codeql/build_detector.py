@@ -501,7 +501,20 @@ class BuildDetector:
     # Note: -I/ (root include) is technically allowed — file permissions are
     # the protection. CodeQL's --source-root prevents system headers from
     # being indexed as project code.
-    _SAFE_FLAG_TOKEN = re.compile(r'^-?[A-Za-z0-9._/+=-]+$')
+    # Pre-fix this used `^...$`. Python regex `$` matches end-of-
+    # string OR just-before-a-trailing-newline, so a flag token
+    # `-DEVIL=$(rm -rf $HOME)\n` passed validation: the trailing
+    # `\n` was eaten by `$`. The safe-flag token then flowed into
+    # the build script as `-DEVIL=$(rm -rf $HOME)` (the newline
+    # got stripped) — and even more dangerously, in some
+    # contexts the embedded `\n` carried through to subprocess
+    # arg lists, where the next process's argv parser saw two
+    # arguments: the flag plus whatever followed the newline.
+    #
+    # Use `\A...\Z` for unambiguous string-boundary anchors:
+    # `\Z` doesn't accept the trailing newline, so the
+    # injection-shaped flag is correctly rejected.
+    _SAFE_FLAG_TOKEN = re.compile(r'\A-?[A-Za-z0-9._/+=-]+\Z')
 
     def _validate_flags(self, flags: list) -> list:
         """Validate and normalise compiler flags.
@@ -806,12 +819,50 @@ for i, src in enumerate(FILES):
             created_dirs.add(obj_dir)
         cmd = [COMPILER, "-w"] + FLAGS + ["-c", src, "-o", obj]
 
-    result = subprocess.run(cmd, stderr=subprocess.PIPE)
-    if result.returncode == 0:
+    # Per-compile stderr cap. Pre-fix `stderr=subprocess.PIPE`
+    # buffered the full stderr stream into the parent before
+    # returning — for C++ template-instantiation errors a
+    # SINGLE source file can produce tens of MB of stderr.
+    # Across hundreds of source files in a target, the script's
+    # RSS grew unbounded. Operators saw the build script
+    # OOM-killed mid-pass.
+    #
+    # Use Popen + bounded read(N) so each compile's stderr is
+    # capped at 256 KB — enough for a useful diagnostic
+    # excerpt, hard upper bound. Drain remaining bytes via
+    # /dev/null so the child can finish without SIGPIPE.
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+    _STDERR_CAP = 256 * 1024
+    captured = b""
+    if proc.stderr is not None:
+        captured = proc.stderr.read(_STDERR_CAP)
+        # Drain any remainder so the child unblocks on its
+        # next stderr write rather than hanging on a full
+        # pipe buffer (PIPE_BUF is 64 KB on Linux; without
+        # the drain, a child writing > 256 KB sleeps in
+        # write(2) waiting for a reader).
+        while proc.stderr.read(64 * 1024):
+            pass
+    proc.wait()
+    if proc.returncode == 0:
         ok += 1
     else:
         fail += 1
-        sys.stderr.buffer.write(result.stderr)
+        sys.stderr.buffer.write(captured)
+        if proc.stderr is not None and len(captured) >= _STDERR_CAP:
+            sys.stderr.buffer.write(
+                # Doubled braces escape in the OUTER template so the
+                # generated script gets a literal brace pair (runtime
+                # f-string reference to the script-local _STDERR_CAP),
+                # NOT an outer-scope substitution. Pre-fix the single
+                # braces let the OUTER f-string evaluate _STDERR_CAP
+                # at template-generation time, which raised NameError
+                # because _STDERR_CAP only exists in the GENERATED
+                # script scope. (Note: keep this comment free of
+                # triple-quotes — the outer template uses triple
+                # single-quotes.)
+                f"\\n[truncated to first {{_STDERR_CAP // 1024}} KB]\\n".encode()
+            )
 
 print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
 ''')
@@ -1064,8 +1115,23 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
                     logger.debug("CC output wasn't valid JSON")
                     return None
 
-            includes = self._validate_flags(data.get("includes", []))
-            defines = self._validate_flags(data.get("defines", []))
+            # Pre-fix `data.get("includes", [])` returned the
+            # default `[]` only when the key was MISSING. If the
+            # CC LLM emitted `{"includes": null, "defines": null}`
+            # (common when the model thought "no useful suggestion"
+            # and serialised null instead of an empty array), the
+            # `.get("includes", [])` returned None, and
+            # `_validate_flags(None)` crashed with `TypeError:
+            # 'NoneType' object is not iterable`. Coerce explicit
+            # null to [] in addition to the missing-key default.
+            #
+            # Real failure mode: a quiet json-from-CC failure
+            # turned into a Python traceback aborting the whole
+            # heuristic-build flow, where the right behaviour is
+            # to log "no flags suggested" and proceed with the
+            # base build.
+            includes = self._validate_flags(data.get("includes") or [])
+            defines = self._validate_flags(data.get("defines") or [])
 
             if includes or defines:
                 logger.info(f"  CC suggested {len(includes)} includes, {len(defines)} defines")

@@ -110,8 +110,26 @@ def check_net_available() -> bool:
             return False
 
         try:
+            # Pre-fix this was `if sysctl.exists() and
+            # sysctl.read_text() == "0": ...`. The exists() call
+            # creates a TOCTOU window between the existence
+            # check and the read — between them the kernel
+            # module exporting the sysctl could be unloaded
+            # (rare, but `rmmod user_namespaces` during a probe
+            # is possible on test / CI hosts), or the path could
+            # be intercepted by an attacker via /proc remount.
+            #
+            # Single-step it: just attempt the read and treat
+            # FileNotFoundError as "no sysctl, assume kernel
+            # default (enabled)". OSError covers the broader
+            # "/proc not mounted" case (containers without
+            # /proc, exotic init systems).
             sysctl = Path("/proc/sys/kernel/unprivileged_userns_clone")
-            if sysctl.exists() and sysctl.read_text().strip() == "0":
+            try:
+                value = sysctl.read_text().strip()
+            except FileNotFoundError:
+                value = ""  # No sysctl on this kernel — defaults to enabled.
+            if value == "0":
                 logger.debug("Sandbox: unprivileged user namespaces disabled (sysctl)")
                 state._net_available_cache = False
                 return False

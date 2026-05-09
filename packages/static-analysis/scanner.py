@@ -504,6 +504,31 @@ def run_codeql(repo_path: Path, out_dir: Path, languages):
             timeout=1800,
         )
         if rc != 0:
+            # Pre-fix this branch silently `continue`d on DB-create
+            # failure, leaving the operator with no idea why the
+            # SARIF list was short. The most common DB-create
+            # failures (missing build deps for compiled langs,
+            # source-root containing forbidden chars, codeql wheel
+            # version mismatch) produce diagnostic stderr that is
+            # actionable — but not visible.
+            #
+            # Truncate stderr to keep the log readable; codeql
+            # error output can run thousands of lines on
+            # extraction failures.
+            stderr_tail = (se or "").strip()
+            if len(stderr_tail) > 2000:
+                stderr_tail = "..." + stderr_tail[-2000:]
+            # `RaptorLogger.warning(message, **kwargs)` accepts ONLY
+            # a single message arg (no printf-style varargs like
+            # stdlib `logging.Logger.warning`). Pre-fix the call
+            # passed positional substitution args and raised
+            # `TypeError: warning() takes 2 positional arguments
+            # but 5 were given`. Pre-format via f-string.
+            _stderr_disp = stderr_tail or "<empty>"
+            logger.warning(
+                f"codeql database create failed for language {lang} "
+                f"(rc={rc}). Last stderr: {_stderr_disp}"
+            )
             continue
         # Queries — same `--threads=0` for parallel query
         # execution. Quiet codeql query suites (cpp / java)

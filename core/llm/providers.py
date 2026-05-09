@@ -515,7 +515,28 @@ def _coerce_to_schema(data: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str,
             except (ValueError, TypeError):
                 coerced[field_name] = 0.0
 
-        elif field_type == "integer" and not isinstance(value, int):
+        elif field_type == "integer" and (
+            # Pre-fix the check was just `not isinstance(value, int)`.
+            # Python booleans ARE ints (`isinstance(True, int) == True`)
+            # because `bool` is a subclass of `int`. An LLM
+            # emitting `true` / `false` for an integer-typed
+            # schema slot then bypassed coercion entirely, and
+            # the boolean leaked into the consumer's "integer"
+            # field. Pydantic validation accepts bool-as-int via
+            # the same subclass relationship, so the bug only
+            # surfaced when the consumer's downstream arithmetic
+            # produced surprising results (`True + 1 == 2` but
+            # `(True).bit_length() == 1`, etc.) or when the value
+            # was JSON-serialised back out and the report showed
+            # `"count": true` instead of `"count": 1`.
+            #
+            # Explicit `or isinstance(value, bool)` forces bool
+            # values through the int(value) coercion path
+            # (int(True) == 1, int(False) == 0) so the slot
+            # ends up with a real int.
+            not isinstance(value, int)
+            or isinstance(value, bool)
+        ):
             try:
                 coerced[field_name] = int(value)
             except (ValueError, TypeError):
@@ -1096,9 +1117,39 @@ class OpenAICompatibleProvider(LLMProvider):
         if msg.content:
             out_blocks.append(TextBlock(text=msg.content))
         for tc in (msg.tool_calls or []):
+            # Pre-fix `args = json.loads(tc.function.arguments)`
+            # silently fell back to `args = {}` on JSON parse
+            # failure. The downstream tool handler then received
+            # an EMPTY argument dict and either:
+            #   * failed schema validation with a confusing
+            #     "missing required field" message that didn't
+            #     hint at "the LLM emitted malformed JSON";
+            #   * succeeded with default values and produced a
+            #     wrong result that the LLM then doubled down
+            #     on in subsequent turns.
+            #
+            # Log the parse failure with the raw arguments
+            # snippet so operators see WHY the tool call
+            # missed its arguments. Truncate the raw text to
+            # avoid flooding logs with massive malformed
+            # payloads.
             try:
                 args = json.loads(tc.function.arguments)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _arg_exc:
+                _raw = str(getattr(tc.function, "arguments", ""))[:400]
+                _name = getattr(tc.function, "name", "?")
+                _tcid = getattr(tc, "id", "?")
+                # `RaptorLogger.warning(message, **kwargs)` accepts
+                # ONLY a single message arg (no printf-style varargs
+                # like stdlib `logging.Logger.warning`). Pre-fix the
+                # call passed positional substitution args and raised
+                # `TypeError: warning() takes 2 positional arguments
+                # but 6 were given`. Pre-format via f-string instead.
+                logger.warning(
+                    f"OpenAI-compat tool-call arguments unparseable for "
+                    f"tool={_name!r} (id={_tcid!r}): {_arg_exc}. "
+                    f"Raw: {_raw!r}"
+                )
                 args = {}
             out_blocks.append(ToolCall(
                 id=tc.id, name=tc.function.name, input=args,
@@ -2235,6 +2286,17 @@ class ClaudeCodeLLMProvider(LLMProvider):
         )
         cmd = build_cc_command(cc_config)
 
+        # Pass safe env to the cc subprocess. Pre-fix
+        # `subprocess.run(cmd, ...)` inherited the parent's
+        # full environment, including HTTPS_PROXY, BASH_ENV,
+        # PYTHONSTARTUP, and any other variable a poisoned
+        # operator dotfile might set. Use RaptorConfig.get_
+        # safe_env() to strip DANGEROUS_ENV_VARS + proxy
+        # vars so cc runs with a clean baseline. See
+        # the long-form rationale at the first cc subprocess.
+        from core.config import RaptorConfig as _RaptorConfig
+        _cc_env = _RaptorConfig.get_safe_env()
+
         start = _time.time()
         try:
             proc = subprocess.run(
@@ -2243,6 +2305,7 @@ class ClaudeCodeLLMProvider(LLMProvider):
                 text=True,
                 capture_output=True,
                 timeout=self._timeout_s,
+                env=_cc_env,
             )
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(
@@ -2314,6 +2377,17 @@ class ClaudeCodeLLMProvider(LLMProvider):
         )
         cmd = build_cc_command(cc_config)
 
+        # Pass safe env to the cc subprocess. Pre-fix
+        # `subprocess.run(cmd, ...)` inherited the parent's
+        # full environment, including HTTPS_PROXY, BASH_ENV,
+        # PYTHONSTARTUP, and any other variable a poisoned
+        # operator dotfile might set. Use RaptorConfig.get_
+        # safe_env() to strip DANGEROUS_ENV_VARS + proxy
+        # vars so cc runs with a clean baseline. See
+        # the long-form rationale at the first cc subprocess.
+        from core.config import RaptorConfig as _RaptorConfig
+        _cc_env = _RaptorConfig.get_safe_env()
+
         start = _time.time()
         try:
             proc = subprocess.run(
@@ -2322,6 +2396,7 @@ class ClaudeCodeLLMProvider(LLMProvider):
                 text=True,
                 capture_output=True,
                 timeout=self._timeout_s,
+                env=_cc_env,
             )
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(

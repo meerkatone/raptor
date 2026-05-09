@@ -98,8 +98,25 @@ def _sanitize_log_message(msg: str) -> str:
         r'|(?:ACCESS|AUTH|BEARER|ID|REFRESH|SESSION|SERVICE)[_-]?TOKEN)'
     )
     # Quoted values may be short or contain spaces/commas; the field name marks them sensitive.
+    #
+    # Pre-fix the value capture was unbounded `(.*?)` plus a
+    # quote-backref `(\2)`. The combination is O(n²) on
+    # adversarial input containing many quote-shaped chars:
+    # the engine tries every position-pair where the leading
+    # quote could close, with a lazy match in between, and
+    # the backref forces re-checking. A 100KB log line full
+    # of mismatched quotes pinned the regex engine for
+    # seconds.
+    #
+    # Cap the value capture at 4096 chars. Real secrets
+    # (API keys, passwords, tokens, JWTs) max out at
+    # ~2048 chars in extreme cases (long JWT with many
+    # claims); 4 KB leaves 2x headroom while bounding the
+    # quadratic-shape backtracking. Any value longer than
+    # 4 KB inside a quoted string in a log line is almost
+    # certainly garbage, not a legitimate credential.
     msg = re.sub(
-        rf'(\b{secret_field}\b["\']?\s*[:=]\s*)(["\'])(.*?)(\2)',
+        rf'(\b{secret_field}\b["\']?\s*[:=]\s*)(["\'])(.{{0,4096}}?)(\2)',
         r'\1\2[REDACTED-API-KEY]\4',
         msg,
         flags=re.IGNORECASE,

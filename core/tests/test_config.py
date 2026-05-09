@@ -5,9 +5,30 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
+# Pre-fix this file did:
+#
+#   import sys
+#   sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+#
+# in order to make the bare `from core.config import RaptorConfig`
+# import below work when pytest is run from a deep cwd.
+#
+# Two problems with that:
+#
+#   1. Project rule (CLAUDE.md "Python path safety"): NEVER add
+#      anything to sys.path except `os.environ["RAPTOR_DIR"]`. The
+#      `parent.parent.parent` walk hard-codes the test's distance
+#      from the repo root, so moving the file (e.g. into
+#      `core/tests/unit/`) would silently start importing from
+#      whatever stray directory happened to be three levels up.
+#   2. Mutating sys.path at MODULE-import time leaks the entry
+#      into every other test that imports later in the same
+#      session — a global side-effect from a single test file.
+#
+# pytest's top-level `conftest.py` already adds the repo root
+# to sys.path before any test module imports. The bare
+# `from core.config import RaptorConfig` works without the
+# manual insert. Drop the mutation.
 from core.config import RaptorConfig
 
 
@@ -48,8 +69,20 @@ class TestGetSafeEnv:
             env = RaptorConfig.get_safe_env()  # must not raise
             assert isinstance(env, dict)
 
-    def test_returns_copy_not_original(self):
-        """Mutations to the returned dict must not affect os.environ."""
+    def test_mutations_do_not_leak_to_os_environ(self):
+        """Mutating the returned dict must NOT propagate to os.environ.
+
+        Pre-fix this test was named ``test_returns_copy_not_
+        original``. The name implies an identity check
+        (``env is not os.environ``) — but the body asserts a
+        BEHAVIOURAL property: that mutations don't leak. The two
+        are not equivalent: a defensive shallow copy passes
+        ``is not`` but a deep nested mutation could still alias
+        through. Renaming clarifies what the test actually
+        guarantees, so future readers don't add a redundant
+        identity check or weaken the leak check thinking the
+        original name covers both.
+        """
         env = RaptorConfig.get_safe_env()
         env["RAPTOR_TEST_SENTINEL"] = "should_not_leak"
         assert "RAPTOR_TEST_SENTINEL" not in os.environ
@@ -102,6 +135,73 @@ class TestGetOutDir:
         with patch.dict(os.environ, env_without, clear=True):
             result = RaptorConfig.get_out_dir()
             assert result == RaptorConfig.BASE_OUT_DIR
+
+    def test_empty_raptor_out_dir_falls_back(self):
+        """Empty string for RAPTOR_OUT_DIR should fall back to base.
+
+        Pre-fix this branch was uncovered: the implementation
+        does ``if not base: return BASE_OUT_DIR``, which catches
+        BOTH unset (None) and empty (``""``) — but only the
+        unset case had a test. An accidental
+        ``RAPTOR_OUT_DIR=`` (e.g. shell-expansion of an
+        unset var with ``$RAPTOR_OUT_DIR``) used to surface as
+        a ``Path("").resolve()`` returning cwd, which the
+        forbidden-prefix check then rejected randomly depending
+        on cwd. Confirm the empty-string fallback explicitly.
+        """
+        with patch.dict(os.environ, {"RAPTOR_OUT_DIR": ""}):
+            result = RaptorConfig.get_out_dir()
+            assert result == RaptorConfig.BASE_OUT_DIR
+
+    @pytest.mark.parametrize("system_path", [
+        "/etc", "/etc/foo",
+        "/usr", "/usr/local/bin",
+        "/bin", "/sbin",
+        "/boot", "/dev", "/proc", "/sys",
+    ])
+    def test_rejects_system_paths(self, system_path):
+        """RAPTOR_OUT_DIR pointing at a system prefix raises ValueError.
+
+        Pre-fix the system-path warning branch was uncovered.
+        The branch existed (refusing /etc, /usr, etc.) but no
+        test verified it actually rejected. A regression that
+        accidentally downgraded the raise to a warning would
+        have shipped silently and caused operator output to
+        land under /etc on the next misconfigured run.
+
+        Test both the bare prefix (``/usr``) and a sub-path
+        (``/usr/local/bin``) — the implementation matches on
+        the path-component boundary specifically to allow
+        ``/usr-local-foo`` while still catching ``/usr/x``.
+        """
+        with patch.dict(os.environ, {"RAPTOR_OUT_DIR": system_path}):
+            with pytest.raises(ValueError, match="resolves under system path"):
+                RaptorConfig.get_out_dir()
+
+    def test_accepts_usr_local_lookalike(self):
+        """`/usr-local-foo` must NOT match the `/usr` rule.
+
+        The forbidden-prefix check uses component-boundary
+        matching specifically to avoid this false positive.
+        Pre-fix this case was uncovered, leaving the
+        component-boundary logic vulnerable to a "naive
+        startswith refactor for simplicity" that would have
+        broken legitimate operator paths.
+        """
+        with patch.dict(os.environ, {"RAPTOR_OUT_DIR": "/tmp/usr-local-foo"}):
+            # Resolved → /tmp/usr-local-foo, parent /tmp exists,
+            # so no ValueError on the system-path check; should
+            # return the resolved path.
+            try:
+                result = RaptorConfig.get_out_dir()
+                assert "/usr-local-foo" in str(result)
+            except ValueError as e:
+                if "system path" in str(e):
+                    pytest.fail(
+                        f"/usr-local-foo wrongly matched /usr rule: {e}"
+                    )
+                raise
+
 
 class TestEnsureDirectories:
     """Tests for RaptorConfig.ensure_directories()."""

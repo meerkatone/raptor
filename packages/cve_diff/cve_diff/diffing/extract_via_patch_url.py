@@ -102,7 +102,32 @@ def _patch_url_for(ref: RepoRef) -> str | None:
 
 
 # ``diff --git a/<before> b/<after>`` — captures the post-fix path.
-_DIFF_GIT_RE = re.compile(r"^diff --git a/.+? b/(.+)$")
+#
+# Pre-fix the regex was `^diff --git a/.+? b/(.+)$`. Two issues:
+#
+#   1. The lazy `.+?` for the BEFORE path can backtrack into the
+#      ` b/` separator if the AFTER capture has trouble matching
+#      downstream — for paths containing the literal substring
+#      ` b/` (a path component that happens to be `b`,
+#      e.g. `dir/b/file.c`), the regex matches at an unexpected
+#      ` b/` instead of the canonical separator. Git's
+#      `diff --git` line is documented as always using `a/...`
+#      and `b/...` prefixes; the separator is the FIRST ` b/`
+#      after `a/`.
+#
+#   2. The greedy `(.+)$` capture grabs everything to end-of-line,
+#      including trailing whitespace. Git itself never emits
+#      trailing whitespace on this header line, but operator-
+#      edited / copy-pasted patch files can carry stray trailing
+#      spaces or `\r` from Windows CRLF, turning the captured
+#      path into `path/file\r` which then fails downstream
+#      file-existence checks.
+#
+# Switch to non-whitespace classes for both halves: `diff --git`
+# paths can't contain spaces anyway (git would have escaped them),
+# and `\S+` for the after-path capture trims trailing whitespace /
+# CR naturally.
+_DIFF_GIT_RE = re.compile(r"^diff --git a/\S+? b/(\S+)\r?$")
 # ``@@ -A,B +C,D @@ context`` — used to count hunks per file.
 _HUNK_RE = re.compile(r"^@@ ")
 
