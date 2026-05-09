@@ -1117,9 +1117,33 @@ class OpenAICompatibleProvider(LLMProvider):
         if msg.content:
             out_blocks.append(TextBlock(text=msg.content))
         for tc in (msg.tool_calls or []):
+            # Pre-fix `args = json.loads(tc.function.arguments)`
+            # silently fell back to `args = {}` on JSON parse
+            # failure. The downstream tool handler then received
+            # an EMPTY argument dict and either:
+            #   * failed schema validation with a confusing
+            #     "missing required field" message that didn't
+            #     hint at "the LLM emitted malformed JSON";
+            #   * succeeded with default values and produced a
+            #     wrong result that the LLM then doubled down
+            #     on in subsequent turns.
+            #
+            # Log the parse failure with the raw arguments
+            # snippet so operators see WHY the tool call
+            # missed its arguments. Truncate the raw text to
+            # avoid flooding logs with massive malformed
+            # payloads.
             try:
                 args = json.loads(tc.function.arguments)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _arg_exc:
+                _raw = str(getattr(tc.function, "arguments", ""))[:400]
+                logger.warning(
+                    "OpenAI-compat tool-call arguments unparseable for "
+                    "tool=%r (id=%r): %s. Raw: %r",
+                    getattr(tc.function, "name", "?"),
+                    getattr(tc, "id", "?"),
+                    _arg_exc, _raw,
+                )
                 args = {}
             out_blocks.append(ToolCall(
                 id=tc.id, name=tc.function.name, input=args,
