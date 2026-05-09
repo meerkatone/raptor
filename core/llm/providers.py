@@ -2519,12 +2519,19 @@ class ClaudeCodeLLMProvider(LLMProvider):
         # can decide whether to switch providers or accept the gap.
         if provider_specific and not type(self)._provider_specific_warned:
             type(self)._provider_specific_warned = True
+            # `RaptorLogger.warning(message, **kwargs)` accepts only a
+            # single message arg (no printf-style varargs). Pre-fix
+            # this site passed a positional substitution arg and
+            # raised `TypeError: warning() takes 2 positional arguments
+            # but 3 were given` on the FIRST call that hit this
+            # branch. Same root cause as batches J33 + 532. Pre-format
+            # via f-string.
+            _kwargs_list = sorted(provider_specific.keys())
             logger.warning(
-                "ClaudeCodeLLMProvider.turn: ignoring provider_specific "
-                "kwargs %s — CC's subprocess interface doesn't expose these. "
-                "If you need per-turn control over temperature/top_p/etc., "
-                "switch to AnthropicProvider (set ANTHROPIC_API_KEY).",
-                sorted(provider_specific.keys()),
+                f"ClaudeCodeLLMProvider.turn: ignoring provider_specific "
+                f"kwargs {_kwargs_list} — CC's subprocess interface doesn't expose these. "
+                f"If you need per-turn control over temperature/top_p/etc., "
+                f"switch to AnthropicProvider (set ANTHROPIC_API_KEY)."
             )
 
         # No tools → plain text generation. Skip the schema overhead.
