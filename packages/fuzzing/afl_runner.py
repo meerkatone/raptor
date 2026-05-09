@@ -139,12 +139,30 @@ class AFLRunner:
 
     def check_binary_instrumentation(self) -> bool:
         """Check if binary is instrumented for AFL."""
-        # Try to detect AFL instrumentation
-        result = _run_trusted(
-            ["strings", str(self.binary)],
-            capture_output=True,
-            text=True,
-        )
+        # Try to detect AFL instrumentation. `strings` runs over
+        # the operator-supplied (potentially attacker-controlled)
+        # target binary. Pre-fix this had no `timeout=` — a
+        # malformed binary with extreme string-table density
+        # could pin `strings` for many minutes (well-known DoS:
+        # a 1 GB ELF with .rodata of nothing but printable ASCII
+        # produces gigabytes of stdout that strings tries to
+        # buffer). Cap at 60 seconds — well above what a
+        # legitimate scan needs (a normal multi-MB binary
+        # finishes in << 1 second).
+        try:
+            result = _run_trusted(
+                ["strings", str(self.binary)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "strings %s exceeded 60s — assuming not "
+                "AFL-instrumented (treat as needs-QEMU)",
+                self.binary,
+            )
+            return False
 
         is_instrumented = "__AFL" in result.stdout or "afl" in result.stdout.lower()
 
@@ -193,12 +211,25 @@ class AFLRunner:
                 logger.warning(f"AFL compatibility check failed: {e}")
 
     def check_binary_sanitizers(self) -> bool:
-        """Check if binary is compiled with sanitizers like ASAN."""
-        result = _run_trusted(
-            ["strings", str(self.binary)],
-            capture_output=True,
-            text=True,
-        )
+        """Check if binary is compiled with sanitizers like ASAN.
+
+        See `check_binary_instrumentation` for the timeout
+        rationale — same 60s cap, same DoS class.
+        """
+        try:
+            result = _run_trusted(
+                ["strings", str(self.binary)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "strings %s exceeded 60s — sanitizer check "
+                "skipped, assuming none",
+                self.binary,
+            )
+            return False
 
         has_asan = "asan" in result.stdout.lower() or "__asan" in result.stdout.lower()
         has_ubsan = "ubsan" in result.stdout.lower() or "__ubsan" in result.stdout.lower()
