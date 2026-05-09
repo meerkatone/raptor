@@ -362,9 +362,20 @@ def _parse_results(output: str, rule_name: str) -> List[SpatchMatch]:
             json_str = line[len(RESULT_PREFIX):]
             try:
                 d = json.loads(json_str)
-                d.setdefault("rule", rule_name)
-                matches.append(SpatchMatch.from_dict(d))
             except (json.JSONDecodeError, ValueError):
+                continue
+            # Type-guard: spatch's @script:python harness always emits
+            # an object, but a malformed rule (operator-supplied SmPL
+            # that built the JSON literal incorrectly) could emit a
+            # bare array, string, or null. `.setdefault` then crashed
+            # with AttributeError, taking out the WHOLE result-parsing
+            # loop for that invocation. Skip non-object payloads.
+            if not isinstance(d, dict):
+                continue
+            d.setdefault("rule", rule_name)
+            try:
+                matches.append(SpatchMatch.from_dict(d))
+            except (TypeError, ValueError, KeyError):
                 continue
     return matches
 
