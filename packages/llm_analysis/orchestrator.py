@@ -712,18 +712,50 @@ def orchestrate(
     # Consensus (if configured)
     consensus_models = role_resolution.get("consensus_models", [])
     consensus_budget_skipped = False
+    consensus_all_errored = False
     if consensus_models:
         consensus_task = ConsensusTask(profile=profile)
         eligible = consensus_task.select_items(findings, results_by_id)
+        # Snapshot the cost tracker state BEFORE dispatch so we can
+        # tell budget-skipped (no spend) from all-errored (spend
+        # incurred but every call failed) afterwards.
+        _ct_before = cost_tracker.total_cost_usd if cost_tracker else 0.0
         dispatch_task(
             consensus_task, findings, dispatch_fn, role_resolution,
             results_by_id, cost_tracker, max_parallel,
         )
+        # Pre-fix the post-dispatch check was:
+        #
+        #   if eligible and not any(... r.get("consensus") ...):
+        #       consensus_budget_skipped = True
+        #
+        # That branch fires for TWO distinct outcomes:
+        #
+        #   (1) Budget cap hit — dispatch never made any LLM calls
+        #       for the eligible set (cost_tracker spend == 0
+        #       across the consensus stage).
+        #   (2) Every call ERRORED — dispatch made N LLM calls,
+        #       all returned an error envelope, no `consensus`
+        #       field landed on any finding.
+        #
+        # Both reach "no consensus on the findings" but the
+        # operator's response is opposite: (1) means "raise the
+        # consensus budget", (2) means "investigate the API
+        # failures". Pre-fix both got reported as "budget skipped"
+        # in the orchestration summary, masking errors.
+        #
+        # Distinguish via spend delta: if the cost tracker
+        # advanced, calls were made; the absence of consensus is
+        # all-errored. If spend stayed flat, it's budget-skipped.
         if eligible and not any(
             isinstance(r, dict) and r.get("consensus")
             for r in results_by_id.values()
         ):
-            consensus_budget_skipped = True
+            _ct_after = cost_tracker.total_cost_usd if cost_tracker else 0.0
+            if _ct_after > _ct_before:
+                consensus_all_errored = True
+            else:
+                consensus_budget_skipped = True
 
     # Judge review (if configured) — sees primary reasoning, critiques it
     judge_models = role_resolution.get("judge_models", [])
@@ -936,6 +968,11 @@ def orchestrate(
         "consensus_agreed": consensus_agreed,
         "consensus_disputes": consensus_disputes,
         "consensus_budget_skipped": consensus_budget_skipped,
+        # New: distinguish "budget capped before any LLM calls"
+        # from "calls made but all errored". Operators reading the
+        # report need to act differently on each — the existing
+        # `consensus_budget_skipped` flag was conflating both.
+        "consensus_all_errored": consensus_all_errored,
         "judge_models": [m.model_name for m in judge_models],
         "judge_agreed": judge_agreed,
         "judge_disputes": judge_disputes,
