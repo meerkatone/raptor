@@ -525,6 +525,16 @@ def orchestrate(
         # `_probe_failed` flips True if ANY model fails (any-fail
         # gate, same semantics as before). Only successful probes
         # contribute to `_probed_profiles`.
+        # Track which models specifically failed the probe so the
+        # PASSTHROUGH override (if accepted) records the right
+        # model names. Pre-fix `defense_telemetry.record_weakened_
+        # override(analysis_model_name, ...)` always recorded
+        # under the PRIMARY's name — even when the failing model
+        # was a secondary (e.g. --model claude-opus,gpt-4 with
+        # gpt-4 failing). Operators reading the scorecard saw
+        # claude-opus credited with the override when claude-opus
+        # actually probed clean.
+        _failed_probe_models: list = []
         for _probe_model in _models_to_probe:
             _pname = _probe_model.model_name if hasattr(_probe_model, "model_name") else str(_probe_model)
             _pprofile = get_profile_for(_pname)
@@ -534,6 +544,7 @@ def orchestrate(
             defense_telemetry.set_probe_result(_pname, probe_result.compatible)
             if not probe_result.compatible:
                 _probe_failed = True
+                _failed_probe_models.append((_pname, probe_result.error))
                 # Continue probing remaining models so each gets
                 # its own telemetry record.
                 continue
@@ -559,11 +570,18 @@ def orchestrate(
                 print(f"\n  {e}")
                 return None
             profile = PASSTHROUGH
-            defense_telemetry.record_weakened_override(analysis_model_name, probe_result.error)
-            logger.warning(
-                "Operator accepted weakened defenses for %s (probe error: %s)",
-                analysis_model_name, probe_result.error,
-            )
+            # Record the override against EACH failing model with
+            # ITS OWN error message — not the primary's name with
+            # whatever happened to be the last probe_result.
+            # Multi-model runs where a secondary failed now show
+            # the secondary in the scorecard, matching reality.
+            for _fmname, _ferr in (_failed_probe_models
+                                   or [(analysis_model_name, probe_result.error)]):
+                defense_telemetry.record_weakened_override(_fmname, _ferr)
+                logger.warning(
+                    "Operator accepted weakened defenses for %s (probe error: %s)",
+                    _fmname, _ferr,
+                )
             print(f"\n  *** DEFENSE WARNING: envelope probe failed for {model_label} ***")
             print(f"  Running with reduced defences (--accept-weakened-defenses)")
             print(f"  Reason: {probe_result.error}")
