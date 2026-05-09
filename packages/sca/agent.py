@@ -428,6 +428,16 @@ def parse_pom(p):
             })
         return deps
     except Exception as e:
+        # Return type heterogeneity is an explicit contract here:
+        # success → `list` of dep dicts; failure → `{'error': ...}`
+        # dict. The contract is pinned by
+        # `test_returns_error_dict_on_invalid_xml` and
+        # `test_returns_error_dict_on_missing_file`.
+        # Call sites must check `isinstance(result, dict) and 'error'
+        # in result` before iterating — otherwise `for d in {...}`
+        # yields the dict's KEYS (i.e. the literal string `'error'`)
+        # which then feeds into OSV lookups as a "package name". See
+        # the parse_pom call site in `main()` for the correct usage.
         return {'error': str(e)}
 
 
@@ -613,7 +623,17 @@ def main():
     for p in find_dependency_files(repo):
         entry = {'path': str(p)}
         if p.name == 'pom.xml':
-            entry['deps'] = parse_pom(p)
+            _result = parse_pom(p)
+            # Surface parse_pom's error-on-failure dict contract via
+            # an `error` field on the entry, then store an empty deps
+            # list so downstream consumers iterating `for d in
+            # entry['deps']` don't iterate the error dict's KEYS (the
+            # literal string `'error'`) and feed it into OSV lookups.
+            if isinstance(_result, dict) and 'error' in _result:
+                entry['error'] = _result['error']
+                entry['deps'] = []
+            else:
+                entry['deps'] = _result
         elif p.name == 'requirements.txt':
             entry['deps'] = parse_requirements(p)
         elif p.name == 'package.json':
