@@ -515,7 +515,28 @@ def _coerce_to_schema(data: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str,
             except (ValueError, TypeError):
                 coerced[field_name] = 0.0
 
-        elif field_type == "integer" and not isinstance(value, int):
+        elif field_type == "integer" and (
+            # Pre-fix the check was just `not isinstance(value, int)`.
+            # Python booleans ARE ints (`isinstance(True, int) == True`)
+            # because `bool` is a subclass of `int`. An LLM
+            # emitting `true` / `false` for an integer-typed
+            # schema slot then bypassed coercion entirely, and
+            # the boolean leaked into the consumer's "integer"
+            # field. Pydantic validation accepts bool-as-int via
+            # the same subclass relationship, so the bug only
+            # surfaced when the consumer's downstream arithmetic
+            # produced surprising results (`True + 1 == 2` but
+            # `(True).bit_length() == 1`, etc.) or when the value
+            # was JSON-serialised back out and the report showed
+            # `"count": true` instead of `"count": 1`.
+            #
+            # Explicit `or isinstance(value, bool)` forces bool
+            # values through the int(value) coercion path
+            # (int(True) == 1, int(False) == 0) so the slot
+            # ends up with a real int.
+            not isinstance(value, int)
+            or isinstance(value, bool)
+        ):
             try:
                 coerced[field_name] = int(value)
             except (ValueError, TypeError):
