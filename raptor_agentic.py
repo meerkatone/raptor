@@ -133,14 +133,33 @@ def run_command_streaming(cmd: list, description: str) -> tuple[int, str, str]:
         stdout_lines = []
         stderr_lines = []
 
-        # Create threads to read stdout and stderr concurrently
+        # Create threads to read stdout and stderr concurrently.
+        #
+        # `daemon=True` so an unexpected interpreter exit doesn't
+        # block on a stuck reader. Pre-fix the threads were
+        # foreground (default `daemon=False`); on a failure path
+        # where the parent's main thread raised before reaching
+        # the bounded join (e.g. a downstream lifecycle helper
+        # crashing during `_complete_lifecycle`), Python's atexit
+        # path waited indefinitely for the readers to finish —
+        # which they wouldn't, because the child process was
+        # gone but its grandchildren held the pipe FDs open.
+        # Operators saw RAPTOR "complete" then HANG at exit
+        # instead of returning to the prompt; the only escape
+        # was Ctrl-C, which often killed the run summary too.
+        # With daemon=True the interpreter exits regardless,
+        # losing any in-flight stream lines (acceptable — by
+        # then the run is already over and post-processing is
+        # done).
         stdout_thread = threading.Thread(
             target=stream_output,
-            args=(process.stdout, stdout_lines)
+            args=(process.stdout, stdout_lines),
+            daemon=True,
         )
         stderr_thread = threading.Thread(
             target=stream_output,
-            args=(process.stderr, stderr_lines)
+            args=(process.stderr, stderr_lines),
+            daemon=True,
         )
 
         # Start reading threads
