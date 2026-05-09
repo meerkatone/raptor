@@ -55,22 +55,107 @@ def _make_finding(finding_id, rule_id, file_path, start_line):
 
 
 def _make_cc_result(finding_id, exploitable=True, score=0.85):
-    """Create a valid CC sub-agent result dict."""
+    """Create a valid CC sub-agent result dict.
+
+    Two correctness contracts the validator + cc_dispatch enforce:
+
+    1. Every field weighted in ``core.llm.response_validation``'s
+       _FINDING_RESULT_WEIGHTS table needs a value (None is fine for
+       nullable fields). Missing high-weight fields drop the
+       quality score below 0.5 → cc_dispatch logs a low-quality
+       warning and may override is_exploitable.
+
+    2. Self-consistency: ``false_positive_reason`` MUST be None
+       when ``is_true_positive=True`` (a true positive is by
+       definition NOT a false positive). The validator at
+       packages.llm_analysis.validation flags otherwise.
+
+    This fixture sets is_true_positive=True regardless of
+    exploitability — a finding can be a true positive AND
+    not-exploitable (the bug is real but unreachable) — so
+    false_positive_reason stays None throughout.
+    """
     return {
         "finding_id": finding_id,
         "is_true_positive": True,
         "is_exploitable": exploitable,
         "exploitability_score": score,
+        "confidence": "high" if exploitable else "low",
         "severity_assessment": "high" if exploitable else "low",
+        "ruling": "exploitable" if exploitable else "not_exploitable",
         "reasoning": "Test reasoning",
         "attack_scenario": "Test scenario" if exploitable else None,
         "exploit_code": "# exploit" if exploitable else None,
         "patch_code": "# patch",
+        "cvss_vector": (
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+            if exploitable else None
+        ),
+        "cvss_score_estimate": 9.8 if exploitable else None,
+        "vuln_type": "sql_injection" if exploitable else None,
+        "cwe_id": "CWE-89" if exploitable else None,
+        "dataflow_summary": (
+            "input → query" if exploitable else None
+        ),
+        "remediation": "use parameterised queries" if exploitable else None,
+        # ``is_true_positive=True`` above means this finding is NOT
+        # a false positive, so the reason field MUST be None — see
+        # contract (2) in the docstring.
+        "false_positive_reason": None,
+        "impact": "data exfiltration" if exploitable else None,
+        "prerequisites": (
+            ["authenticated user"] if exploitable else None
+        ),
+        "tool": "test",
+        "rule_id": "test/rule",
     }
 
 
 def _mock_subprocess_ok(results_by_call):
-    """Create a subprocess.run mock that returns results in order."""
+    """Create a subprocess.run mock that returns the right result
+    for each finding.
+
+    ``results_by_call`` may be either:
+
+    * a dict ``{finding_id: result_json}`` — preferred for parallel
+      dispatch, matched against the prompt the test passes via
+      ``input=`` kwarg;
+    * a list — legacy positional behaviour, returned in call order.
+
+    Parallel orchestration dispatches findings in non-deterministic
+    order; positional matching returns the WRONG result for the
+    wrong finding_id, the orchestrator then retries to correct, and
+    the retry mock returns clamped-to-last results which compounds
+    the mismatch. Dict-keyed matching is order-independent.
+    """
+    if isinstance(results_by_call, dict):
+        def mock_run_by_marker(cmd, **kwargs):
+            # Each dict key is a substring (e.g. file path) the
+            # caller picked because it appears in the prompt for
+            # exactly one finding. The build_analysis_prompt_bundle
+            # builder embeds rule_id / file_path / line info in the
+            # prompt, but NOT the synthetic ``finding_id`` the test
+            # uses for its own bookkeeping — match on something the
+            # prompt actually carries.
+            result = MagicMock()
+            result.returncode = 0
+            prompt = kwargs.get("input", "") or ""
+            chosen = None
+            for marker, payload in results_by_call.items():
+                if marker in prompt:
+                    chosen = payload
+                    break
+            if chosen is None:
+                # No marker matched — return the first entry so the
+                # orchestrator's retry logic still sees something
+                # parseable rather than crashing on empty stdout.
+                chosen = next(iter(results_by_call.values()))
+            result.stdout = chosen
+            result.stderr = ""
+            return result
+
+        return mock_run_by_marker
+
     call_count = [0]
 
     def mock_run(cmd, **kwargs):
@@ -167,10 +252,18 @@ class TestOrchestrate:
         report_path = tmp_path / "report.json"
         report_path.write_text(json.dumps(report))
 
-        cc_results = [
-            json.dumps(_make_cc_result("f-001", exploitable=True)),
-            json.dumps(_make_cc_result("f-002", exploitable=False, score=0.1)),
-        ]
+        # Dict-keyed mock so parallel dispatch returns the right
+        # result for each finding regardless of completion order.
+        # Keys must be substrings the analysis prompt embeds — the
+        # builder uses rule_id / file_path / line, NOT the synthetic
+        # finding_id this test assigns. ``db.py`` / ``template.js``
+        # are distinctive enough to identify each finding's prompt.
+        cc_results = {
+            "db.py": json.dumps(_make_cc_result("f-001", exploitable=True)),
+            "template.js": json.dumps(
+                _make_cc_result("f-002", exploitable=False, score=0.1)
+            ),
+        }
 
         with patch.dict(os.environ, {}, clear=True), \
              patch("packages.llm_analysis.orchestrator.shutil.which", return_value="/usr/bin/claude"), \
