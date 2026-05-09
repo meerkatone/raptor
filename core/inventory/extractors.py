@@ -1065,8 +1065,16 @@ def _extract_macros_regex(content: str) -> List[CodeItem]:
     are legitimate code items — they're part of the file's structure.
     """
     macros = []
+    # `re.ASCII` so `\w` matches only ASCII word chars. C identifiers
+    # are ASCII per the spec; without the flag, Python's `\w` admits
+    # Unicode word characters (Cyrillic, Greek, etc.). A hostile or
+    # confused source dropping a non-ASCII identifier through a
+    # `#define` would have its name captured here and surfaced into
+    # the inventory under a homoglyph that matches a real ASCII
+    # identifier — confusing greps + downstream cross-references.
+    _DEFINE_RE = re.compile(r'^\s*#\s*define\s+(\w+)', re.ASCII)
     for i, line in enumerate(content.splitlines(), 1):
-        m = re.match(r'^\s*#\s*define\s+(\w+)', line)
+        m = _DEFINE_RE.match(line)
         if m:
             macros.append(CodeItem(
                 name=m.group(1),
