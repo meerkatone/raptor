@@ -80,7 +80,30 @@ def validate_zip_contents(zip_path: Path) -> Tuple[bool, List[str]]:
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            warnings = _check_zip_entries(zf.infolist())
+            # Pre-fix `zf.infolist()` materialised the FULL entry
+            # table before `_check_zip_entries` could examine even
+            # the first one. A zip-bomb shaped file with millions
+            # of entries (each pointing at the same compressed
+            # blob) consumed multi-GB RSS just on the
+            # infolist materialisation — `validate_zip_contents`
+            # OOM'd before its safety checks ran.
+            #
+            # Cap the entry count: a legitimate RAPTOR project zip
+            # holds at most a few hundred output files (run dirs,
+            # findings, reports, attachments). 10,000 is generous
+            # and far below the entry counts that trigger
+            # bomb-shaped resource exhaustion. Refuse over-cap.
+            _MAX_ENTRIES = 10_000
+            entries = []
+            for i, info in enumerate(zf.infolist()):
+                if i >= _MAX_ENTRIES:
+                    return False, [
+                        f"zip has more than {_MAX_ENTRIES} entries — "
+                        f"refusing as zip-bomb shape (legitimate "
+                        f"RAPTOR project exports have << 1000 entries)"
+                    ]
+                entries.append(info)
+            warnings = _check_zip_entries(entries)
     except zipfile.BadZipFile:
         return False, ["Invalid zip file"]
 

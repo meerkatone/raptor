@@ -117,6 +117,34 @@ class _RowContext:
 # =============================================================================
 
 
+def _as_int(v: Any) -> int:
+    """Coerce a GH Archive numeric field to int.
+
+    GH Archive emits ``issue.number`` / ``pr.number`` / ``comment.id``
+    as a JSON number on modern entries but as a string on some older
+    entries (pre-2015). Pre-fix the parser stored whatever GH Archive
+    returned — including string-typed numbers — into the ``int``-typed
+    dataclass field. Downstream comparisons (``issue_number > 100``,
+    sort by ``pr_number``) then mixed string and int values and
+    crashed with ``TypeError``, or — silently — sorted lexicographically
+    so PR #100 came before PR #2.
+
+    Coerce here so the dataclass field's type annotation matches the
+    actual runtime value. Garbage falls back to 0 (mirrors the
+    pre-existing ``.get("number", 0)`` default).
+    """
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except (ValueError, AttributeError):
+            return 0
+    if isinstance(v, float):
+        return int(v)
+    return 0
+
+
 def parse_push_event(row: dict[str, Any], table: str | None = None) -> PushEvent:
     """Parse GH Archive PushEvent into PushEvent evidence."""
     ctx = _RowContext(row, table)
@@ -169,7 +197,7 @@ def parse_issue_event(row: dict[str, Any], table: str | None = None) -> IssueEve
         "deleted": IssueAction.DELETED,
     }
     action = action_map.get(action_str, IssueAction.OPENED)
-    issue_number = issue.get("number", 0)
+    issue_number = _as_int(issue.get("number", 0))
 
     return IssueEvent(
         evidence_id=generate_evidence_id("issue", ctx.repository.full_name, str(issue_number), action_str),
@@ -217,7 +245,7 @@ def parse_pull_request_event(row: dict[str, Any], table: str | None = None) -> P
     if action_str == "closed" and pr.get("merged"):
         action = PRAction.MERGED
 
-    pr_number = pr.get("number", 0)
+    pr_number = _as_int(pr.get("number", 0))
 
     return PullRequestEvent(
         evidence_id=generate_evidence_id("pr", ctx.repository.full_name, str(pr_number), action_str),
@@ -240,17 +268,18 @@ def parse_issue_comment_event(row: dict[str, Any], table: str | None = None) -> 
     ctx = _RowContext(row, table)
     issue = ctx.payload.get("issue", {})
     comment = ctx.payload.get("comment", {})
-    comment_id = comment.get("id", 0)
+    comment_id = _as_int(comment.get("id", 0))
+    issue_number = _as_int(issue.get("number", 0))
 
     return IssueCommentEvent(
         evidence_id=generate_evidence_id("comment", ctx.repository.full_name, str(comment_id)),
         when=ctx.when,
         who=ctx.who,
-        what=f"Comment on issue #{issue.get('number')}",
+        what=f"Comment on issue #{issue_number}",
         repository=ctx.repository,
         verification=ctx.verification,
         action=ctx.payload.get("action", "created"),
-        issue_number=issue.get("number", 0),
+        issue_number=issue_number,
         comment_id=comment_id,
         comment_body=comment.get("body", ""),
     )

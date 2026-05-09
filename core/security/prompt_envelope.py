@@ -156,17 +156,24 @@ class PromptBundle:
 # rendering. We replace each match with a sentinel rather than deleting so
 # the model sees that *something* was here and can flag it.
 _AUTOFETCH_MARKUP_RE = re.compile(
-    r'!\[[^\]]*\]\([^)]+\)'
+    # Bound `[^]]*`, `[^)]+`, `[^>]*` repetitions at 8 KB. Pre-fix the
+    # arms were unbounded — a long line of attacker content with no
+    # closing `]`, `)`, or `>` would force the engine to scan to the
+    # end of input on every alternation try. Real markdown links and
+    # HTML tags fit well under 1 KB; 8 KB leaves headroom for a
+    # legitimately long URL plus attribute clutter while bounding
+    # adversarial input. Each arm gets its own `{0,8192}` cap.
+    r'!\[[^\]]{0,8192}\]\([^)]{1,8192}\)'
     # Markdown link with auto-fetching scheme. `vbscript:` is the IE-era
     # equivalent of `javascript:` and still parses in some renderers.
     # `//host/path` (scheme-relative) inherits the page scheme — at-risk
     # in any context where the rendered output flows back to a browser.
-    r'|\[[^\]]*\]\((?:https?|ht%74ps?|data|javascript|vbscript|file|ftp)?:[^)]+\)'
-    r'|\[[^\]]*\]\(//[^)]+\)'
-    r'|<(?:img|iframe|object|embed|video|audio|source|link|script|base|form|use)\b[^>]*>'
-    r'|<a\s[^>]*>'
-    r'|<svg\b[^>]*>'
-    r'|<meta\b[^>]*>'
+    r'|\[[^\]]{0,8192}\]\((?:https?|ht%74ps?|data|javascript|vbscript|file|ftp)?:[^)]{1,8192}\)'
+    r'|\[[^\]]{0,8192}\]\(//[^)]{1,8192}\)'
+    r'|<(?:img|iframe|object|embed|video|audio|source|link|script|base|form|use)\b[^>]{0,8192}>'
+    r'|<a\s[^>]{0,8192}>'
+    r'|<svg\b[^>]{0,8192}>'
+    r'|<meta\b[^>]{0,8192}>'
     # `<style>` with body OR a self-contained tag. The original pattern
     # required `</style>`, so a malformed `<style>...` (no close tag) or
     # a self-closing variant slipped through. `\b[^>]*>` matches either,
@@ -176,7 +183,15 @@ _AUTOFETCH_MARKUP_RE = re.compile(
     r'|<style\b[^>]*>'
     r'|@import\s+url\([^)]*\)'
     r'|\[[^\]]+\]:\s*(?:https?|data|javascript|vbscript|file|ftp):[^\s]+'
-    r'|data:[a-zA-Z0-9+./;-]+,[^\s)]*',
+    # Bound the data: URI tail. Pre-fix `[a-zA-Z0-9+./;-]+` (mediatype)
+    # plus `[^\s)]*` (payload) was unbounded — a 10 MB base64-encoded
+    # blob inside a single `data:` URI would force the regex engine to
+    # consume the whole thing before the autofetch defang stripped it
+    # (and the result was a multi-MB string operation in the strip).
+    # Real autofetch defang only cares that the URI EXISTS and gets
+    # neutered; capping the mediatype at 256 chars and the payload at
+    # 64 KB still recognises every realistic case.
+    r'|data:[a-zA-Z0-9+./;-]{1,256},[^\s)]{0,65536}',
     re.IGNORECASE | re.DOTALL,
 )
 

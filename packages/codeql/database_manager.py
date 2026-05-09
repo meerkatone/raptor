@@ -115,15 +115,23 @@ class DatabaseManager:
         return [str(Path(self.codeql_cli).resolve().parent)]
 
     def _detect_codeql_cli(self) -> Optional[str]:
-        """Detect CodeQL CLI path."""
+        """Detect CodeQL CLI path.
+
+        `os.access(path, X_OK)` instead of bare `Path.exists()`. Pre-fix
+        the env-var path was accepted as long as the file existed —
+        `CODEQL_CLI=/etc/passwd` would have us shell out to a non-
+        executable file, which then raised OSError at subprocess.run
+        with a confusing stderr instead of failing the detection
+        cleanly.
+        """
         import os
 
         # Check environment variable
         env_cli = os.environ.get("CODEQL_CLI")
-        if env_cli and Path(env_cli).exists():
+        if env_cli and os.access(env_cli, os.X_OK):
             return env_cli
 
-        # Check PATH
+        # Check PATH (shutil.which already requires X_OK)
         cli_path = shutil.which("codeql")
         if cli_path:
             return cli_path
@@ -131,7 +139,19 @@ class DatabaseManager:
         return None
 
     def get_codeql_version(self) -> Optional[str]:
-        """Get CodeQL version."""
+        """Get CodeQL version.
+
+        Returns the dotted-version number (e.g. ``"2.16.4"``) extracted
+        from `codeql version` output, or None on failure. Pre-fix the
+        function returned the WHOLE first line, which on modern CodeQL
+        looks like::
+
+            CodeQL command-line toolchain release 2.16.4.
+
+        Callers comparing against version strings (semver, regex
+        `\\d+\\.\\d+`) then matched against the trailing prose, not the
+        version number, and either crashed or silently mismatched.
+        """
         try:
             result = subprocess.run(
                 [self.codeql_cli, "version"],
@@ -140,9 +160,16 @@ class DatabaseManager:
                 timeout=10,
             )
             if result.returncode == 0:
-                # Parse version from output (first line usually contains version)
-                version = result.stdout.strip().split('\n')[0]
-                return version
+                # Parse first dotted-version-shaped token from stdout.
+                # `re.ASCII` so Unicode digits don't sneak in (see
+                # packages/exploit_feasibility/profiles.py for the same
+                # rationale applied to glibc parsing).
+                m = re.search(r'\d+(?:\.\d+){1,3}', result.stdout, re.ASCII)
+                if m:
+                    return m.group(0)
+                # Fallback for unexpected output: return first line so
+                # operators still see SOMETHING in logs/banners.
+                return result.stdout.strip().split('\n')[0] or None
             return None
         except Exception as e:
             logger.warning(f"Failed to get CodeQL version: {e}")
@@ -355,9 +382,22 @@ class DatabaseManager:
         processes (not threads) so this is fine in practice; a future
         thread-based caller would need a different staging key (e.g.,
         include thread.get_ident()).
+
+        Uniqueness suffix: PID alone is NOT sufficient when two writers
+        live in DIFFERENT PID namespaces (containers) but share a
+        bind-mounted db_root. Two containers can both report
+        `os.getpid() == 1` (their per-ns init) and silently collide on
+        `.staging-<language>-1`. Append a 4-byte random uniquifier so
+        cross-namespace writers stay isolated even if their PID
+        coincides. The `_gc_stale_markers` path globs `.staging-*` so
+        the trailing uniquifier doesn't break orphan cleanup.
         """
+        import secrets
         canonical = self.get_database_dir(repo_hash, language)
-        return canonical.parent / f".staging-{language}-{os.getpid()}"
+        return (
+            canonical.parent
+            / f".staging-{language}-{os.getpid()}-{secrets.token_hex(4)}"
+        )
 
     def _stale_marker_name(self, canonical: Path) -> str:
         """Build a unique stale-marker name for an evicted canonical.
@@ -631,8 +671,38 @@ class DatabaseManager:
             f"--source-root={repo_path}",
         ]
 
-        # Set working directory and environment
+        # Set working directory and environment.
+        #
+        # `os.access(working_dir, os.X_OK)` check before passing to
+        # subprocess. A directory must have execute permission for a
+        # process to chdir into it; without it, subprocess.run with
+        # `cwd=working_dir` fails with PermissionError that the caller
+        # sees only as "build failed". The common cause is a noexec
+        # mount: shared CI runners that mount the build area noexec for
+        # security, or `/tmp` mounted noexec on hardened hosts. Surface
+        # the issue with an actionable message instead of a generic
+        # subprocess error. Skip on platforms without POSIX
+        # permission semantics (Windows: os.access semantics differ
+        # but the noexec hazard doesn't apply the same way).
         working_dir = build_system.working_dir if build_system else repo_path
+        if (
+            os.name == "posix"
+            and not os.access(working_dir, os.X_OK)
+        ):
+            return DatabaseResult(
+                success=False,
+                language=language,
+                database_path="",
+                metadata=None,
+                errors=[
+                    f"working_dir {working_dir!r} lacks execute permission "
+                    f"(POSIX dir-exec). Common cause: noexec mount on the "
+                    f"build area. Re-mount with exec, or move the build "
+                    f"into a directory that has it (e.g. $HOME)."
+                ],
+                duration_seconds=time.time() - start_time,
+                cached=False,
+            )
         env = RaptorConfig.get_safe_env()
         if build_system and build_system.env_vars:
             # Filter build env vars through the same blocklist — a malicious
@@ -683,7 +753,15 @@ class DatabaseManager:
                 build_script = Path(script_name)
                 try:
                     build_script.write_text(f"#!/bin/bash\n{build_cmd}\n")
-                    build_script.chmod(build_script.stat().st_mode | stat.S_IEXEC)
+                    # 0o500 (read+execute, no write) for parity with
+                    # `build_detector.py:871`'s synthesised-script mode
+                    # — TOCTOU mitigation: a separate process can't
+                    # modify the script between our write and CodeQL's
+                    # exec. Pre-fix the chmod was
+                    # `st_mode | S_IEXEC` which kept the write bit
+                    # from mkstemp's 0o600 default, leaving the script
+                    # writable for the lifetime of the build invocation.
+                    build_script.chmod(0o500)
                 except BaseException:
                     build_script.unlink(missing_ok=True)
                     build_script = None
@@ -755,6 +833,27 @@ class DatabaseManager:
                 did_promote = False
                 used_cached = False
                 try:
+                    # Pre-flight existence check. `os.rename` on Linux
+                    # silently SUCCEEDS when the target is an empty
+                    # directory — it replaces the empty dir without
+                    # raising ENOTEMPTY. A sibling that created
+                    # `canonical_path` as a placeholder (e.g. via
+                    # `mkdir`-as-lock pattern in some other tool, or a
+                    # half-initialised promote-in-progress state) would
+                    # have its empty dir silently overwritten by our
+                    # staging — the lost-race branch never fires and we
+                    # don't validate the sibling's intent. Raise
+                    # FileExistsError manually so the existing
+                    # ENOTEMPTY/EEXIST handler treats this case the
+                    # same as a populated-target collision.
+                    if canonical_path.exists():
+                        raise FileExistsError(
+                            errno.EEXIST,
+                            "canonical_path exists pre-rename "
+                            "(possibly empty placeholder); routing "
+                            "through lost-race handler",
+                            str(canonical_path),
+                        )
                     os.rename(staging_path, canonical_path)
                     logger.info(f"✓ Database promoted to canonical: {canonical_path}")
                     did_promote = True
@@ -898,8 +997,22 @@ class DatabaseManager:
             )
 
         finally:
-            if build_script and build_script.exists():
-                build_script.unlink()
+            # build_script unlink: missing_ok=True so a script that
+            # was already cleaned up by an earlier branch (or that
+            # never landed on disk because mkstemp succeeded but
+            # write_text raised) doesn't crash the cleanup. Pre-fix
+            # `build_script.unlink()` raised FileNotFoundError when
+            # the success path had already deleted the script, AND
+            # raised PermissionError if the script's parent dir got
+            # mounted noexec/readonly mid-build (rare but observed
+            # on some CI runners). Either case took the cleanup
+            # exception out of `finally:` and skipped the staging
+            # rmtree below.
+            if build_script:
+                try:
+                    build_script.unlink(missing_ok=True)
+                except OSError as _bs_err:
+                    logger.debug(f"build_script unlink failed: {_bs_err}")
             # Belt-and-braces staging cleanup for timeout / unhandled exception
             # paths that bypass the success/failure cleanup branches above.
             # Skip if we ended up using staging as final_path (the fallback

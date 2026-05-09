@@ -226,12 +226,22 @@ class JavaScriptExtractor:
         r'^\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{',
         r'(\w+)\s*:\s*(?:async\s+)?(?:function\s*)?\([^)]*\)\s*(?:=>)?\s*\{',
     ]
+    # Several patterns repeat `\s*` between optional tokens. On a long
+    # whitespace-only run that fails the structural part, the engine
+    # backtracks each `\s*` separately. Cap line length before applying
+    # any of the JS patterns. Real JS is rarely linted to >120 chars;
+    # 16 KB allows minified single-line modules through up to a
+    # reasonable bound while refusing pathological input (a single
+    # 100 MB minified bundle would otherwise sit in this loop).
+    _MAX_JS_LINE = 16 * 1024
 
     def extract(self, filepath: str, content: str) -> List[FunctionInfo]:
         functions = []
         seen = set()
 
         for i, line in enumerate(content.split('\n'), 1):
+            if len(line) > self._MAX_JS_LINE:
+                continue
             for pattern in self.PATTERNS:
                 match = re.search(pattern, line)
                 if match:
@@ -259,10 +269,27 @@ class CExtractor:
     risk breaking existing extraction).
     """
 
-    ANSI_PATTERN = r'^(?:[\w\s\*]+)\s+(\w+)\s*\([^;]*\)\s*\{'
-    ANSI_SPLIT_PATTERN = r'^(?:[\w\s\*]+)\s+(\w+)\s*\([^;{]*\)\s*$'
-    KNR_FUNCNAME = r'^(\w+)\s*\([\w\s,]*\)\s*$'
-    FUNCNAME_OPEN_PAREN = r'^(\w+)\s*\([^)]*$'
+    # `[\w\s\*]+` is greedy and overlaps the following `\s+` (both match
+    # space). On a line that's a long run of word/space chars without a
+    # following `{` or `(`, the engine must try every backtrack position
+    # before declaring no-match. Pathological input
+    # (e.g. `"a" * 50000 + "\n"`) made `re.match` quadratic in line
+    # length. C source lines aren't longer than ~10 KB in practice (per
+    # most house style guides); cap the per-line input at `_MAX_C_LINE`
+    # before running the matcher so a stray minified file or a
+    # generated source dump (single-line concatenated declarations)
+    # can't hang inventory.
+    # Compile with `re.ASCII` so the `\w` captures match only ASCII
+    # word chars. C identifiers are ASCII per the language spec; without
+    # the flag, Python's `\w` admits Unicode word characters that would
+    # be captured as the function name and surfaced into the inventory
+    # under a homoglyph that visually matches a real ASCII identifier
+    # — confusing greps and downstream cross-references.
+    ANSI_PATTERN = r'(?a)^(?:[\w\s\*]+)\s+(\w+)\s*\([^;]*\)\s*\{'
+    ANSI_SPLIT_PATTERN = r'(?a)^(?:[\w\s\*]+)\s+(\w+)\s*\([^;{]*\)\s*$'
+    _MAX_C_LINE = 16 * 1024
+    KNR_FUNCNAME = r'(?a)^(\w+)\s*\([\w\s,]*\)\s*$'
+    FUNCNAME_OPEN_PAREN = r'(?a)^(\w+)\s*\([^)]*$'
 
     C_TYPE_HINTS = frozenset({
         'void', 'int', 'char', 'short', 'long', 'float', 'double',
@@ -306,6 +333,12 @@ class CExtractor:
 
             stripped = line.strip()
             if stripped.startswith('#') or stripped.startswith('//'):
+                i += 1
+                continue
+
+            # Cap line length before regex match — see ANSI_PATTERN
+            # comment for the ReDoS rationale.
+            if len(line) > self._MAX_C_LINE:
                 i += 1
                 continue
 
@@ -380,7 +413,18 @@ class JavaExtractor:
     Missing without tree-sitter: annotations (@RequestMapping etc).
     """
 
+    # `((?:public|private|protected|static|\s)+)` — `\s` is in the
+    # alternation AND repeated, so a long whitespace run before any
+    # method-shaped tail must be backtracked one space at a time on a
+    # failed match. Combined with the `(?:throws\s+[\w,\s]+)?` tail
+    # also consuming `\s`, a degenerate Java line like
+    # `"public " + " " * 50000 + ";\n"` (no trailing `{`) hits the
+    # backtracking. Cap line length before regex match. Real Java
+    # method headers are well under 8 KB; 16 KB leaves headroom for
+    # generated annotations / generics-heavy signatures while
+    # refusing pathological input.
     PATTERN = r'((?:public|private|protected|static|\s)+)([\w<>\[\]]+)\s+(\w+)\s*\(([^)]*)\)\s*(?:throws\s+[\w,\s]+)?\s*\{'
+    _MAX_JAVA_LINE = 16 * 1024
 
     def extract(self, filepath: str, content: str) -> List[FunctionInfo]:
         functions = []
@@ -391,6 +435,11 @@ class JavaExtractor:
             class_match = re.search(r'class\s+(\w+)', line)
             if class_match:
                 current_class = class_match.group(1)
+
+            # Cap line length before regex match — see PATTERN comment
+            # for the ReDoS rationale.
+            if len(line) > self._MAX_JAVA_LINE:
+                continue
 
             match = re.search(self.PATTERN, line)
             if match:
@@ -1022,8 +1071,16 @@ def _extract_macros_regex(content: str) -> List[CodeItem]:
     are legitimate code items — they're part of the file's structure.
     """
     macros = []
+    # `re.ASCII` so `\w` matches only ASCII word chars. C identifiers
+    # are ASCII per the spec; without the flag, Python's `\w` admits
+    # Unicode word characters (Cyrillic, Greek, etc.). A hostile or
+    # confused source dropping a non-ASCII identifier through a
+    # `#define` would have its name captured here and surfaced into
+    # the inventory under a homoglyph that matches a real ASCII
+    # identifier — confusing greps + downstream cross-references.
+    _DEFINE_RE = re.compile(r'^\s*#\s*define\s+(\w+)', re.ASCII)
     for i, line in enumerate(content.splitlines(), 1):
-        m = re.match(r'^\s*#\s*define\s+(\w+)', line)
+        m = _DEFINE_RE.match(line)
         if m:
             macros.append(CodeItem(
                 name=m.group(1),

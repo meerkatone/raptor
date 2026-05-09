@@ -485,6 +485,19 @@ class MultiTurnAnalyser:
         """Extract C code from LLM response."""
         import re
 
+        # Cap response length before regex match. The LLM can be
+        # cajoled into emitting megabytes of code in a single block
+        # (or, in adversarial scenarios, return malformed
+        # never-closing fences that force the engine to consume
+        # the entire response in `(.*?)`'s lazy match before giving
+        # up). Real C exploit code generated for analysis is well
+        # under 64 KB; cap at 1 MB so legitimate large samples (e.g.
+        # heap layouts dumped inline) are accepted while pathological
+        # input is bounded.
+        _MAX_RESPONSE_FOR_CODE_EXTRACTION = 1 * 1024 * 1024
+        if len(response) > _MAX_RESPONSE_FOR_CODE_EXTRACTION:
+            response = response[:_MAX_RESPONSE_FOR_CODE_EXTRACTION]
+
         # Look for code blocks
         code_block_match = re.search(r'```c\n(.*?)```', response, re.DOTALL)
         if code_block_match:
