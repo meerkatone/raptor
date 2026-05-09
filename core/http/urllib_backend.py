@@ -745,7 +745,36 @@ class UrllibClient:
             # the URL yet — fall back to the request URL so callers
             # always see something parseable. Documented contract on
             # Response.url.
+            #
+            # Re-validate the post-redirect URL via _validate_url
+            # (same scheme/userinfo/host gates as the initial
+            # request). Pre-fix urllib3 would happily follow a 302
+            # `Location: http://attacker.com/...` from an https://
+            # request — a downgrade-to-cleartext that bypasses the
+            # caller's TLS expectation. Even if the host is the
+            # same, the scheme drop leaks the full request +
+            # response body in cleartext to anyone on the network
+            # path.
+            #
+            # If post-redirect URL fails validation, raise HttpError
+            # rather than returning the response — caller's expected
+            # contract (validated URL) was violated by the server's
+            # redirect, and silently returning a downgraded response
+            # would mask the violation.
             final_url = resp.geturl() or url
+            # Only revalidate when the URL actually changed AND
+            # is a real string (test fixtures may mock geturl
+            # to return a MagicMock; defensively skip the
+            # validator in that case rather than crashing
+            # urlparse).
+            if isinstance(final_url, str) and final_url != url:
+                try:
+                    self._validate_url(final_url)
+                except HttpError as exc:
+                    raise HttpError(
+                        f"refused redirect from {_safe_url_for_log(url)} "
+                        f"to {_safe_url_for_log(final_url)}: {exc}"
+                    ) from exc
             return Response(
                 status=resp.status,
                 headers={k.lower(): v for k, v in resp.headers.items()},
