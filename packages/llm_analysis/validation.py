@@ -120,6 +120,28 @@ def check_self_consistency(results_by_id: Dict[str, Dict]) -> int:
             r["contradictions"] = contradictions
             flagged += 1
             logger.warning(f"Self-contradiction in {fid}: {contradictions[0]}")
+        else:
+            # Pre-fix this branch was missing — once a finding had
+            # `self_contradictory=True` set, it persisted across
+            # re-runs of `_check_self_consistency` even when a
+            # successful retry resolved the contradiction. The
+            # downstream consensus / judge logic still saw the
+            # stale flag and treated the (now-clean) finding as
+            # uncertain.
+            #
+            # Real failure mode: RetryTask issues a fresh LLM call
+            # whose response IS internally consistent; the
+            # finding's previous self_contradictory=True from the
+            # original call leaks through unchanged. Operators
+            # see "self-contradictory" annotations on findings
+            # whose actual reasoning is fine.
+            #
+            # Clear the flag (and the contradictions list) when
+            # the current pass finds none. dict.pop with default
+            # so this is a no-op for findings that were never
+            # flagged.
+            if r.pop("self_contradictory", False):
+                r.pop("contradictions", None)
 
     if flagged:
         logger.info(f"Self-consistency check: {flagged} finding(s) flagged as contradictory")
