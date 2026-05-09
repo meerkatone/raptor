@@ -130,15 +130,40 @@ def _parse_json_payload(text: str) -> dict:
     m = _JSON_FENCE_RE.search(text)
     if m:
         text = m.group("body")
-    else:
-        first = text.find("{")
-        last = text.rfind("}")
-        if first >= 0 and last > first:
-            text = text[first : last + 1]
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise AnalysisError(f"model returned non-JSON payload: {exc}") from exc
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise AnalysisError(f"model returned non-JSON payload: {exc}") from exc
+
+    # No fenced block — scan forward through `{` positions and use
+    # `JSONDecoder.raw_decode` to consume only the JSON prefix at
+    # each position (ignores trailing prose like "Hope that helps!").
+    # Pre-fix the `text[first:last+1]` extraction picked the WIDEST
+    # `{...}` span, so an LLM response with prose-embedded `{` glyphs
+    # before the actual JSON ("the function takes { args } and
+    # returns: {valid_json}") spanned the prose AND the JSON,
+    # breaking the parse. Bound the scan at 16 attempts so a
+    # response with many literal `{` glyphs (a list of code
+    # samples) doesn't burn measurable wallclock.
+    _decoder = json.JSONDecoder()
+    _attempts = 0
+    _start = 0
+    last_exc: Exception | None = None
+    while _attempts < 16:
+        idx = text.find("{", _start)
+        if idx < 0:
+            break
+        try:
+            obj, _ = _decoder.raw_decode(text[idx:])
+            return obj
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            _start = idx + 1
+            _attempts += 1
+    raise AnalysisError(
+        f"model returned non-JSON payload "
+        f"(scanned {_attempts} brace positions): {last_exc}"
+    ) from last_exc
 
 
 _CWE_RE = re.compile(r"CWE[-_\s]?(\d+)", re.IGNORECASE)
