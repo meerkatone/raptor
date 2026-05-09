@@ -117,6 +117,25 @@ class JsonCache:
         self._writable = True
         # Hit / miss counters for surfacing cache-effectiveness metrics.
         # Reset only by reconstructing the cache.
+        #
+        # Pre-fix `self.hits += 1` / `self.misses += 1` were
+        # un-locked. Python's `+=` on an int is NOT atomic — it
+        # decomposes into LOAD/INCR/STORE, so concurrent
+        # increments under threads can lose updates. The cache
+        # is hit from the CodeQL agent's per-finding parallel
+        # dispatch and from the cve-diff worker pool, both of
+        # which call `get()` from multiple threads. Lost
+        # increments quietly skewed the cache-effectiveness
+        # metric (hit rate read low) — operators tuning cache
+        # TTL / size based on this metric were getting biased
+        # signal.
+        #
+        # Add a lock and increment under it. Cost: one mutex
+        # acquire per get(), which is microseconds (the actual
+        # cache lookup work is several orders of magnitude
+        # slower; locking overhead is in the noise).
+        import threading
+        self._counter_lock = threading.Lock()
         self.hits = 0
         self.misses = 0
         try:
@@ -217,17 +236,20 @@ class JsonCache:
         `get` returned `None` indistinguishably for both cases.
         """
         if not self._writable or self._root is None:
-            self.misses += 1
+            with self._counter_lock:
+                self.misses += 1
             return MISSING
         path = self._path_for(key)
         if not path.exists():
-            self.misses += 1
+            with self._counter_lock:
+                self.misses += 1
             return MISSING
         try:
             envelope = self._read_envelope(path)
         except (OSError, ValueError, KeyError) as e:
             logger.debug("core.json.cache: corrupt entry %s: %s", path, e)
-            self.misses += 1
+            with self._counter_lock:
+                self.misses += 1
             return MISSING
         # Caller may downgrade TTL relative to what was stored. Honour
         # the *minimum* TTL.
@@ -259,9 +281,11 @@ class JsonCache:
             value=envelope.value,
         )
         if not envelope.is_fresh(time.time()):
-            self.misses += 1
+            with self._counter_lock:
+                self.misses += 1
             return MISSING
-        self.hits += 1
+        with self._counter_lock:
+            self.hits += 1
         return envelope.value
 
     def put(self, key: str, value: Any, *, ttl_seconds: int) -> None:
