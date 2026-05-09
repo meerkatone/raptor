@@ -2364,9 +2364,28 @@ class ClaudeCodeLLMProvider(LLMProvider):
         import subprocess
         import time as _time
 
-        full_prompt = (
-            f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-        )
+        # Route system_prompt through CC's `--system` flag instead of
+        # concatenating into the user prompt. Pre-fix this path used
+        # `f"{system_prompt}\n\n{prompt}"`, mixing the trusted system
+        # message into the same channel as user content. The
+        # generate() path above (the freeform sibling of this method)
+        # already uses `--system` correctly. The structured path's
+        # f-string concat:
+        #
+        #   * Drops the trust separation that CC's `--system` flag
+        #     gives us — operator system instructions and finding
+        #     content arrive on the SAME channel from the model's
+        #     perspective.
+        #   * Loses CC's own role-separated rendering — the
+        #     subprocess's prompt-injection defences (which key off
+        #     the role boundary) treated the whole thing as user
+        #     content.
+        #
+        # Bring this site in line with generate(): full_prompt is
+        # the user content; system_prompt routes through
+        # CCDispatchConfig.system_prompt (which build_cc_command
+        # converts into a `--system` flag).
+        full_prompt = prompt
         cc_config = CCDispatchConfig(
             claude_bin=self._claude_bin,
             tools="",                                # see generate() comment
@@ -2374,6 +2393,7 @@ class ClaudeCodeLLMProvider(LLMProvider):
             timeout_s=self._timeout_s,
             json_schema=schema,
             capture_json_envelope=True,
+            system_prompt=system_prompt,
         )
         cmd = build_cc_command(cc_config)
 
@@ -2499,12 +2519,19 @@ class ClaudeCodeLLMProvider(LLMProvider):
         # can decide whether to switch providers or accept the gap.
         if provider_specific and not type(self)._provider_specific_warned:
             type(self)._provider_specific_warned = True
+            # `RaptorLogger.warning(message, **kwargs)` accepts only a
+            # single message arg (no printf-style varargs). Pre-fix
+            # this site passed a positional substitution arg and
+            # raised `TypeError: warning() takes 2 positional arguments
+            # but 3 were given` on the FIRST call that hit this
+            # branch. Same root cause as batches J33 + 532. Pre-format
+            # via f-string.
+            _kwargs_list = sorted(provider_specific.keys())
             logger.warning(
-                "ClaudeCodeLLMProvider.turn: ignoring provider_specific "
-                "kwargs %s — CC's subprocess interface doesn't expose these. "
-                "If you need per-turn control over temperature/top_p/etc., "
-                "switch to AnthropicProvider (set ANTHROPIC_API_KEY).",
-                sorted(provider_specific.keys()),
+                f"ClaudeCodeLLMProvider.turn: ignoring provider_specific "
+                f"kwargs {_kwargs_list} — CC's subprocess interface doesn't expose these. "
+                f"If you need per-turn control over temperature/top_p/etc., "
+                f"switch to AnthropicProvider (set ANTHROPIC_API_KEY)."
             )
 
         # No tools → plain text generation. Skip the schema overhead.

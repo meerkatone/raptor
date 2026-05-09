@@ -253,8 +253,18 @@ def _get_quota_guidance(model_name: str, provider: str) -> str:
         return "\n→ Anthropic rate limit exceeded"
     elif provider_lower == "ollama":
         return "\n→ Ollama server limit exceeded"
-    else:
+    elif provider_lower:
         return f"\n→ {provider.title()} rate limit exceeded"
+    else:
+        # Pre-fix the catch-all branch ran for empty-provider strings,
+        # producing the cosmetically-broken `"\n→  rate limit exceeded"`
+        # (double space, no provider name) that operators saw in
+        # error logs as "what's empty? did the framework break?".
+        # Empty provider is a real case for in-process tests and
+        # for failures where the model_config wasn't yet wired up.
+        # Surface a generic message that doesn't pretend to know the
+        # provider.
+        return "\n→ Rate limit exceeded (provider unspecified)"
 
 
 class LLMClient:

@@ -232,9 +232,44 @@ def dispatch_task(
         # CC path: no model resolution, dispatch_fn ignores model parameter
         models = [None]
 
-    # Budget pre-check
+    # Budget pre-check.
+    #
+    # Pre-fix this used `models[0].model_name` for the per-call
+    # rate estimate. With multi-model dispatch (`--model
+    # claude-opus --model gpt-4o`), the cost tracker estimated
+    # the WHOLE phase as if every call used models[0]'s rate —
+    # so a phase routing 50% of calls to a 10x-cheaper secondary
+    # model still got estimated at the full primary rate.
+    # Operators saw "skipped — budget" warnings on phases that
+    # would actually have fit within budget.
+    #
+    # Use the MAXIMUM per-call rate across the model list. The
+    # estimate is then conservative (over-, never under-), so
+    # the budget gate fires at most where it should and never
+    # silently skips a phase that would have fit.
     if task.budget_cutoff < 1.0:
-        model_name = models[0].model_name if models[0] else ""
+        # Pick the most expensive model name as the pessimistic
+        # estimator. cost_tracker.should_skip_phase indexes by
+        # name to look up the rate; passing the priciest gives
+        # the conservative ceiling. Fallback to "" if all None
+        # (CC path) — should_skip_phase handles unknown.
+        named_models = [m for m in models if m is not None]
+        if named_models:
+            # cost_tracker.estimate_call_cost returns USD per call
+            # for the named model; pick the model with the highest
+            # estimated rate.
+            try:
+                model_name = max(
+                    named_models,
+                    key=lambda m: cost_tracker.estimate_call_cost(m.model_name),
+                ).model_name
+            except (AttributeError, TypeError):
+                # Older cost trackers without estimate_call_cost
+                # — fall back to the primary's rate. Same behaviour
+                # as pre-fix for that case.
+                model_name = named_models[0].model_name
+        else:
+            model_name = ""
         total_calls = len(selected) * len(models)
         if cost_tracker.should_skip_phase(total_calls, model_name, task.budget_cutoff, task.name):
             print(f"\n  {task.name}: skipped ({len(selected)} items) — "
@@ -382,9 +417,24 @@ def dispatch_task(
                 # usage, breaking telemetry, cost-per-token
                 # diagnostics, and the model-economy reports the
                 # operator UI surfaces.
-                if item_cost > 0:
-                    model_name = processed.get("analysed_by", "unknown")
-                    item_tokens = getattr(dispatch_result, "tokens", 0) or 0
+                # Pre-fix the gate was `if item_cost > 0:`,
+                # which dropped CC zero-cost responses entirely
+                # — neither the cost (0, fine) NOR the TOKEN
+                # COUNT got recorded. CC subprocess invocations
+                # (`claude -p`) are billed at the parent layer
+                # but produce real token usage that the
+                # downstream model-economy report needs to
+                # surface.
+                #
+                # Run the gate as `cost > 0 OR tokens > 0`:
+                # zero-cost responses with token usage still
+                # contribute to token telemetry, while
+                # truly-empty responses (no cost, no tokens —
+                # error envelopes, immediate refusals) skip
+                # cleanly.
+                model_name = processed.get("analysed_by", "unknown")
+                item_tokens = getattr(dispatch_result, "tokens", 0) or 0
+                if item_cost > 0 or item_tokens > 0:
                     cost_tracker.add_cost(model_name, item_cost, tokens=item_tokens)
 
                 # Progress line

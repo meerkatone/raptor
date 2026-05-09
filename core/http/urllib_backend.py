@@ -29,6 +29,7 @@ allowlisted egress, use :class:`core.http.egress_backend.EgressClient`.
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import logging
 import time
@@ -101,8 +102,36 @@ def _new_pool_manager() -> urllib3.PoolManager:
       single connection). 10 lets up to 10 in-flight per host without
       thrashing kernel resources.
     """
+    # Pre-fix `cert_reqs="CERT_REQUIRED"` enabled validation but
+    # didn't pin `ca_certs=`. urllib3 then falls back to the
+    # system bundle (or worse, a stale OS-bundled CA list on
+    # ancient minimal containers). Pin to certifi's bundle so:
+    #
+    #   * Validation always uses the latest Mozilla CA list
+    #     (certifi ships releases tracking root-store changes;
+    #     system bundles can lag months behind on minimal
+    #     containers / appliances).
+    #   * Operators on hosts with NO system CA bundle (Alpine
+    #     minimal images without ca-certificates installed)
+    #     still get TLS validation — pre-fix they got
+    #     "SSL: CERTIFICATE_VERIFY_FAILED" with no system
+    #     trust anchors.
+    #   * Pinning to the certifi-shipped bundle gives us
+    #     audit-able provenance: the cert set is whatever
+    #     `certifi.where()` returns at install time.
+    try:
+        import certifi
+        ca_certs = certifi.where()
+    except ImportError:
+        # certifi not installed (rare — it's a transitive dep
+        # of requests / urllib3-extras typically). Fall back to
+        # urllib3's default behaviour. Operator sees the
+        # CERTIFICATE_VERIFY_FAILED if the system bundle is
+        # missing; that's the right diagnostic.
+        ca_certs = None
     return urllib3.PoolManager(
         retries=False, cert_reqs="CERT_REQUIRED",
+        ca_certs=ca_certs,
         maxsize=_DEFAULT_POOL_MAXSIZE,
     )
 
@@ -148,7 +177,25 @@ class UrllibClient:
         ``is not None`` check catches the empty-string variant returned
         by urlsplit for adversarial forms like ``http://@evil.com/``.
         """
-        parsed = _urlparse.urlsplit(url)
+        # Pre-fix `_urlparse.urlsplit(url)` raised ValueError
+        # directly for malformed inputs:
+        #
+        #   * IPv6 with bad brackets: `http://[invalid::ipv6/`
+        #   * URL containing NUL byte: `http://a\x00b/`
+        #   * URL with port out of range: `http://h:99999/`
+        #     (`int(port)` raises ValueError downstream).
+        #
+        # Callers expect _validate_url to raise HttpError ONLY,
+        # so they can catch a single exception class. The leaked
+        # ValueError bypassed caller error-handling and surfaced
+        # as an opaque traceback. Wrap urlsplit so the
+        # contract holds.
+        try:
+            parsed = _urlparse.urlsplit(url)
+        except ValueError as exc:
+            raise HttpError(
+                f"Refused malformed URL: {exc}"
+            ) from exc
         if parsed.scheme not in self._ALLOWED_SCHEMES:
             permitted = "/".join(self._ALLOWED_SCHEMES)
             raise HttpError(
@@ -369,7 +416,8 @@ class UrllibClient:
         # Validation runs at call time; the generator below runs at
         # iteration time. Splitting them ensures URL errors fail fast
         # instead of waiting for the first .next() call.
-        return self._stream(url, merged, effective_timeout, max_bytes)
+        return self._stream(url, merged, effective_timeout, max_bytes,
+                            wallclock_cap=total_timeout)
 
     def _stream(
         self,
@@ -377,6 +425,7 @@ class UrllibClient:
         headers: Dict[str, str],
         timeout: int,
         max_bytes: int,
+        wallclock_cap: int = None,
     ) -> Iterator[bytes]:
         resp = self._http.request(
             "GET", url,
@@ -400,6 +449,23 @@ class UrllibClient:
                     f"{reason} {snippet!r}"[:200],
                     status=resp.status,
                 )
+            # Pre-fix the loop honoured ``timeout`` for the
+            # initial connect+read but had NO wall-clock cap on
+            # the streamed body. A slowloris-style server that
+            # trickled bytes (1 byte every 5 seconds, never
+            # idle long enough to trip the per-read timeout)
+            # held the connection open indefinitely. Operators
+            # waiting on the iterator saw "stream stalled"
+            # with no signal to abort.
+            #
+            # Apply ``wallclock_cap`` (passed from the caller's
+            # ``total_timeout``) as a hard ceiling on total
+            # generator lifetime. Aborts with TimeoutError if
+            # the stream takes longer than the cap, matching
+            # the documented contract that ``total_timeout``
+            # bounds the END-TO-END operation.
+            import time as _time
+            _start = _time.monotonic()
             total = 0
             for chunk in resp.stream(64 * 1024, decode_content=True):
                 total += len(chunk)
@@ -407,6 +473,13 @@ class UrllibClient:
                     raise SizeLimitExceeded(
                         f"Stream from {_safe_url_for_log(url)} "
                         f"exceeded {max_bytes} bytes",
+                    )
+                if (wallclock_cap is not None
+                        and _time.monotonic() - _start > wallclock_cap):
+                    raise TimeoutError(
+                        f"Stream from {_safe_url_for_log(url)} exceeded "
+                        f"wallclock cap of {wallclock_cap}s "
+                        f"(slowloris defence)"
                     )
                 yield chunk
         finally:
@@ -652,8 +725,39 @@ class UrllibClient:
             # bodies, and we'd rather hand the caller raw data than
             # corrupt a payload that wasn't actually gzip.
             if raw.startswith(b"\x1f\x8b"):
+                # Pre-fix `gzip.decompress(raw)` had no output cap.
+                # A decompression bomb (gzip ratio >>1000:1, e.g.
+                # 100KB compressed → 10GB decompressed) consumed
+                # the parent process's full RAM before
+                # decompression finished. The size cap on the
+                # response above (`max_bytes`) bounded the
+                # COMPRESSED bytes but not the decompressed
+                # output.
+                #
+                # Use streaming decompression with a per-call
+                # cap matching `max_bytes` (or 50MB if not set
+                # — pathological-but-bounded ceiling for the
+                # rare un-capped path). Abort and keep the raw
+                # compressed bytes on cap-overflow rather than
+                # raising — the existing fallback semantics
+                # are "if decode fails, hand the caller the
+                # raw bytes".
+                _decomp_cap = max_bytes if max_bytes is not None and max_bytes > 0 else 50 * 1024 * 1024
                 try:
-                    raw = gzip.decompress(raw)
+                    decompressor = gzip.GzipFile(fileobj=io.BytesIO(raw), mode='rb')
+                    out = bytearray()
+                    while True:
+                        block = decompressor.read(64 * 1024)
+                        if not block:
+                            break
+                        out.extend(block)
+                        if len(out) > _decomp_cap:
+                            # Decompression bomb. Keep raw,
+                            # don't materialise the bomb output.
+                            out = None
+                            break
+                    if out is not None:
+                        raw = bytes(out)
                 except (OSError, EOFError):
                     pass
 
@@ -667,7 +771,36 @@ class UrllibClient:
             # the URL yet — fall back to the request URL so callers
             # always see something parseable. Documented contract on
             # Response.url.
+            #
+            # Re-validate the post-redirect URL via _validate_url
+            # (same scheme/userinfo/host gates as the initial
+            # request). Pre-fix urllib3 would happily follow a 302
+            # `Location: http://attacker.com/...` from an https://
+            # request — a downgrade-to-cleartext that bypasses the
+            # caller's TLS expectation. Even if the host is the
+            # same, the scheme drop leaks the full request +
+            # response body in cleartext to anyone on the network
+            # path.
+            #
+            # If post-redirect URL fails validation, raise HttpError
+            # rather than returning the response — caller's expected
+            # contract (validated URL) was violated by the server's
+            # redirect, and silently returning a downgraded response
+            # would mask the violation.
             final_url = resp.geturl() or url
+            # Only revalidate when the URL actually changed AND
+            # is a real string (test fixtures may mock geturl
+            # to return a MagicMock; defensively skip the
+            # validator in that case rather than crashing
+            # urlparse).
+            if isinstance(final_url, str) and final_url != url:
+                try:
+                    self._validate_url(final_url)
+                except HttpError as exc:
+                    raise HttpError(
+                        f"refused redirect from {_safe_url_for_log(url)} "
+                        f"to {_safe_url_for_log(final_url)}: {exc}"
+                    ) from exc
             return Response(
                 status=resp.status,
                 headers={k.lower(): v for k, v in resp.headers.items()},

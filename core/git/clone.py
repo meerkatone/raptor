@@ -65,9 +65,28 @@ logger = logging.getLogger(__name__)
 # gitlab.com plus the CDN hosts they redirect to on clone (LFS, object
 # storage). Add a host here only when the URL allowlist in
 # ``validate.py`` also allows it — the two lists must stay coupled.
+#
+# Pre-fix this list missed two CDN hosts that GitHub / GitLab
+# redirect to during clone-time content fetches:
+#
+#   raw.githubusercontent.com:    raw blob downloads (LFS objects,
+#                                  release tarballs, attachment
+#                                  fetches the smudge filter
+#                                  triggers).
+#   media.githubusercontent.com:  binary release artefacts (some
+#                                  release-download flows that LFS-
+#                                  configured repos hit during
+#                                  checkout).
+#
+# Without these, clones of LFS-using repos failed with `unable to
+# access 'https://raw.githubusercontent.com/...'` errors mid-checkout
+# — operator saw "git clone failed" with no signal that the proxy
+# allowlist was the missing piece. Add them so the egress proxy
+# accepts the redirected hosts.
 _PROXY_HOSTS = (
     "github.com", "gitlab.com",
     "codeload.github.com", "objects.githubusercontent.com",
+    "raw.githubusercontent.com", "media.githubusercontent.com",
 )
 
 
@@ -75,6 +94,67 @@ def get_safe_git_env() -> Dict[str, str]:
     """Sanitised env for git subprocess. Same shape as scanner.py used
     pre-centralisation; promoted here so all callers share it."""
     return RaptorConfig.get_git_env()
+
+
+# Per-invocation `-c key=value` overrides for git commands operating
+# on TARGET REPOSITORIES (i.e. cloned-from-untrusted-source). These
+# are layered ON TOP of the env-strip via get_safe_git_env() because
+# env vars cannot suppress per-repo config inside `target/.git/config`
+# — git reads that unconditionally, and a hostile target can ship a
+# `.git/config` containing:
+#
+#   [core]
+#       fsmonitor = /tmp/attacker-script.sh
+#
+# which then runs the attacker script every time git inspects the
+# index (status, diff, log, rev-parse, etc.). CVE-2024-32002 family.
+#
+# `git -c core.fsmonitor=` (empty value) DISABLES the fsmonitor
+# regardless of any per-repo config. Other entries close known RCE
+# vectors:
+#
+#   - core.editor=true: prevents git from launching an attacker-
+#     specified editor on `git commit --amend` or rebase.
+#   - core.pager=cat: prevents pager-shell-out for paged output.
+#   - core.askPass=true: belt-and-braces with GIT_ASKPASS env.
+#   - core.sshCommand=ssh: prevents per-repo SSH command override.
+#   - protocol.file.allow=user: refuses file:// URLs as remotes.
+#   - protocol.ext.allow=never: refuses ext:: protocol shells.
+#
+# Use `safe_git_command(*args)` below instead of building bare
+# `["git", ...]` lists when operating on a target repo.
+_SAFE_GIT_OVERRIDES = (
+    "-c", "core.fsmonitor=",
+    "-c", "core.editor=true",
+    "-c", "core.pager=cat",
+    "-c", "core.askPass=true",
+    "-c", "core.sshCommand=ssh",
+    "-c", "protocol.file.allow=user",
+    "-c", "protocol.ext.allow=never",
+)
+
+
+def safe_git_command(*args: str) -> list:
+    """Return a git argv list with per-invocation safety overrides
+    layered between ``git`` and the caller's args.
+
+    Use for git commands that operate on a TARGET REPOSITORY
+    (cloned from untrusted source). Internal-only repos
+    (RAPTOR's own .git, test fixtures) don't need this — bare
+    ``["git", ...]`` is fine for them.
+
+    Example::
+
+        # Pre-fix:
+        subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"])
+
+        # Post-fix:
+        subprocess.run(safe_git_command("-C", str(repo), "rev-parse", "HEAD"))
+
+    The result is a list (not a tuple) so callers can extend it
+    in-place if needed.
+    """
+    return ["git", *_SAFE_GIT_OVERRIDES, *args]
 
 
 def _validate_writable_path(p: Path, *, role: str) -> None:
@@ -102,6 +182,38 @@ def _validate_writable_path(p: Path, *, role: str) -> None:
             f"paths are unsafe here — the sandbox writable scope "
             f"({role}.parent) would be cwd-dependent."
         )
+    # Pre-fix the validator only refused root and direct-children-of-
+    # root. It silently accepted paths under sensitive system mounts:
+    #
+    #   /dev/shm/foo       — tmpfs visible to all users on the host;
+    #                        a hostile git server cloning into
+    #                        /dev/shm/x can plant attacker-readable
+    #                        files in another user's environment.
+    #   /proc/<pid>/...    — kernel-managed pseudo-fs; writes here
+    #                        either no-op or modify process state
+    #                        (cgroup membership, oom_adj, etc.).
+    #                        Sandbox carving a writable hole into
+    #                        /proc is meaningless at best and
+    #                        privilege-escalation at worst.
+    #   /sys/...           — same as /proc; kernel-managed and
+    #                        denylist on principle.
+    #   /run/...           — runtime state (PID files, sockets);
+    #                        sandbox writes here can collide with
+    #                        systemd / docker / similar.
+    #
+    # Reject these prefixes outright. Operator-legitimate sandbox
+    # work belongs under /tmp, /var/tmp, $HOME, or a dedicated
+    # workspace — not in system pseudo-fs locations.
+    _str = str(p)
+    _DENY_PREFIXES = ("/dev/", "/proc/", "/sys/", "/run/")
+    for prefix in _DENY_PREFIXES:
+        if _str.startswith(prefix) or _str == prefix.rstrip("/"):
+            raise ValueError(
+                f"{role}={str(p)!r} is under a system pseudo-fs prefix "
+                f"({prefix}); refusing to grant the sandbox write "
+                f"access. Use /tmp, /var/tmp, $HOME, or a dedicated "
+                f"workspace path instead."
+            )
     # Two checks against root, both required:
     #
     # 1. The RESOLVED form catches `/tmp/work -> /` symlink attacks
@@ -425,10 +537,29 @@ def ls_remote(
     if not parsed.hostname:
         raise ValueError(f"ls_remote: URL has no hostname: {url!r}")
 
+    # IDNA round-trip on the hostname for canonicalisation. Pre-fix
+    # `parsed.hostname.lower()` worked for ASCII hosts but missed
+    # internationalised domain names. URL `https://пример.рф/...`
+    # has parsed.hostname == "xn--e1afmkfd.xn--p1ai" already (urllib
+    # canonicalises to punycode) — but a URL `https://Пример.рф/`
+    # (mixed-case Cyrillic) parses to "пример.рф" (lower-cased
+    # Cyrillic), which doesn't match a punycode allowlist entry
+    # `xn--e1afmkfd.xn--p1ai`. The IDNA encode normalises to the
+    # canonical punycode form so the allowlist comparison is
+    # reliable across both ASCII and IDN inputs.
+    host_raw = parsed.hostname.lower()
+    try:
+        host = host_raw.encode("idna").decode("ascii").lower()
+    except (UnicodeError, UnicodeDecodeError):
+        # Hostname not encodable — operator may have provided a
+        # malformed value; fall back to the lowered original so
+        # the explicit allowlist mismatch error fires below
+        # rather than crashing here.
+        host = host_raw
+
     # Pre-check the hostname is in the supplied allowlist. The proxy
     # enforces too — this is defence-in-depth and a clearer error
     # before the subprocess fires.
-    host = parsed.hostname.lower()
     allowed_lower = {h.lower() for h in proxy_host_list}
     if host not in allowed_lower:
         raise ValueError(
@@ -449,8 +580,24 @@ def ls_remote(
     # An ephemeral temp dir gives the sandbox a writable scratch
     # area that's discarded as soon as we leave the with-block.
     with tempfile.TemporaryDirectory(prefix="raptor-ls-remote-") as td:
+        # Pre-fix the log line emitted the raw URL. Operators
+        # passing tokens via URL userinfo (`https://oauth2:
+        # token@github.com/owner/repo.git`) leaked the token to
+        # any log destination — RAPTOR's own log files,
+        # forwarded log aggregators, and any operator who
+        # `tail`d a long-running scan. The userinfo check
+        # earlier in this function rejects URL tokens at
+        # validation time, so this log line never sees them in
+        # the canonical happy path — but defence-in-depth: a
+        # future caller could land here without the validator
+        # check (test fixtures, refactor that loosens the
+        # gate). Run through redact_secrets() so any
+        # credentials in URL form are masked before the log
+        # write.
+        from core.security.redaction import redact_secrets
         logger.info("git ls-remote: %s (allowlist=%s)",
-                     url, ",".join(sorted(allowed_lower)))
+                     redact_secrets(url),
+                     ",".join(sorted(allowed_lower)))
         proc = run_untrusted(
             ["git", "ls-remote", "--heads", "--tags", url],
             target=td,

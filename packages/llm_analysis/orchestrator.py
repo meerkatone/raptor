@@ -71,13 +71,51 @@ class CostTracker:
         with self._lock:
             return self._total_cost / self._max_cost
 
+    # ---- Deprecated budget-cutoff API ----
+    #
+    # These three predicates were the early per-phase cutoff
+    # mechanism, replaced by `should_skip_phase` which lets each
+    # caller specify its OWN cutoff via `task.budget_cutoff`. No
+    # production code calls these methods anymore — only the
+    # legacy tests in `test_orchestrator.py` still hit them.
+    #
+    # Pre-fix the methods sat undocumented in the class, looking
+    # like usable API. New callers reading the class would have
+    # adopted them and silently bypassed the per-task cutoff
+    # configuration (CUTOFF_SKIP_CONSENSUS, CUTOFF_SKIP_EXPLOITS,
+    # CUTOFF_SINGLE_MODEL are HARDCODED constants — non-
+    # configurable, ignoring `--max-cost` percentages).
+    #
+    # Mark them deprecated via a DeprecationWarning so any future
+    # surprise caller surfaces. Keep the implementations intact
+    # for backwards-compat with the existing tests; remove in a
+    # follow-up batch once the tests migrate to should_skip_phase.
+
     def should_skip_consensus(self) -> bool:
+        import warnings
+        warnings.warn(
+            "should_skip_consensus is deprecated; use should_skip_phase "
+            "with task.budget_cutoff instead",
+            DeprecationWarning, stacklevel=2,
+        )
         return self._budget_ratio() >= CUTOFF_SKIP_CONSENSUS
 
     def should_skip_exploits(self) -> bool:
+        import warnings
+        warnings.warn(
+            "should_skip_exploits is deprecated; use should_skip_phase "
+            "with task.budget_cutoff instead",
+            DeprecationWarning, stacklevel=2,
+        )
         return self._budget_ratio() >= CUTOFF_SKIP_EXPLOITS
 
     def should_single_model(self) -> bool:
+        import warnings
+        warnings.warn(
+            "should_single_model is deprecated; use should_skip_phase "
+            "with task.budget_cutoff instead",
+            DeprecationWarning, stacklevel=2,
+        )
         return self._budget_ratio() >= CUTOFF_SINGLE_MODEL
 
     def should_skip_phase(self, n_calls: int, model_name: str,
@@ -461,6 +499,42 @@ def orchestrate(
         # probed profile and intersect at the end so AnalysisTask
         # uses the common ground all models passed.
         _probed_profiles: list = []
+        # Pre-fix the loop did `if not probe_result.compatible:
+        # _probe_failed = True; break`. The break terminated the
+        # probe walk on the FIRST failure, so any later models in
+        # the list were never probed and never had their probe
+        # result recorded in `defense_telemetry`.
+        #
+        # Two consequences:
+        #
+        #   (1) Telemetry shows N=1 probe failures attributable to
+        #       the first-failed model, even though the SECOND
+        #       and THIRD models might also be incompatible. The
+        #       operator-facing scorecard then misattributes
+        #       reliability across the model fleet.
+        #
+        #   (2) The intersection of compatible profiles
+        #       (`_intersect_profiles(_probed_profiles)` below)
+        #       only sees the models BEFORE the first failure. If
+        #       the eventual decision is "accept weakened
+        #       defences", the intersected profile reflects an
+        #       incomplete picture of the model fleet's
+        #       compatibility.
+        #
+        # Run all probes, record telemetry for every model.
+        # `_probe_failed` flips True if ANY model fails (any-fail
+        # gate, same semantics as before). Only successful probes
+        # contribute to `_probed_profiles`.
+        # Track which models specifically failed the probe so the
+        # PASSTHROUGH override (if accepted) records the right
+        # model names. Pre-fix `defense_telemetry.record_weakened_
+        # override(analysis_model_name, ...)` always recorded
+        # under the PRIMARY's name — even when the failing model
+        # was a secondary (e.g. --model claude-opus,gpt-4 with
+        # gpt-4 failing). Operators reading the scorecard saw
+        # claude-opus credited with the override when claude-opus
+        # actually probed clean.
+        _failed_probe_models: list = []
         for _probe_model in _models_to_probe:
             _pname = _probe_model.model_name if hasattr(_probe_model, "model_name") else str(_probe_model)
             _pprofile = get_profile_for(_pname)
@@ -470,7 +544,10 @@ def orchestrate(
             defense_telemetry.set_probe_result(_pname, probe_result.compatible)
             if not probe_result.compatible:
                 _probe_failed = True
-                break
+                _failed_probe_models.append((_pname, probe_result.error))
+                # Continue probing remaining models so each gets
+                # its own telemetry record.
+                continue
             _probed_profiles.append(_pprofile)
         # Intersect profiles for multi-model — AND every boolean
         # so any model that lacks a defence layer disables it
@@ -493,11 +570,18 @@ def orchestrate(
                 print(f"\n  {e}")
                 return None
             profile = PASSTHROUGH
-            defense_telemetry.record_weakened_override(analysis_model_name, probe_result.error)
-            logger.warning(
-                "Operator accepted weakened defenses for %s (probe error: %s)",
-                analysis_model_name, probe_result.error,
-            )
+            # Record the override against EACH failing model with
+            # ITS OWN error message — not the primary's name with
+            # whatever happened to be the last probe_result.
+            # Multi-model runs where a secondary failed now show
+            # the secondary in the scorecard, matching reality.
+            for _fmname, _ferr in (_failed_probe_models
+                                   or [(analysis_model_name, probe_result.error)]):
+                defense_telemetry.record_weakened_override(_fmname, _ferr)
+                logger.warning(
+                    "Operator accepted weakened defenses for %s (probe error: %s)",
+                    _fmname, _ferr,
+                )
             print(f"\n  *** DEFENSE WARNING: envelope probe failed for {model_label} ***")
             print(f"  Running with reduced defences (--accept-weakened-defenses)")
             print(f"  Reason: {probe_result.error}")
@@ -709,32 +793,89 @@ def orchestrate(
         dispatch_fn, role_resolution, results_by_id, cost_tracker, max_parallel,
     )
 
+    # Snapshot original primary verdicts BEFORE the consensus
+    # stage runs. ConsensusTask.finalize() mutates
+    # `primary["is_exploitable"]` with the panel-conservative
+    # max, overwriting the primary's reasoning verdict in place.
+    # JudgeTask later reads `primary["is_exploitable"]` to know
+    # what the primary said — but by then it sees the
+    # consensus-overridden value, NOT the primary's actual
+    # reasoning. So judge's "do you agree with primary?" prompt
+    # asks about a verdict primary may not actually hold.
+    #
+    # Pre-fix this snapshot was taken AFTER consensus, BEFORE
+    # judge — capturing the post-consensus value, which defeated
+    # the snapshot's purpose. Take it here, before BOTH stages,
+    # so judge can compare against the actual primary verdict.
+    primary_verdicts_pre_consensus: Dict[str, bool] = {}
+    for fid, r in results_by_id.items():
+        if isinstance(r, dict) and "error" not in r:
+            primary_verdicts_pre_consensus[fid] = bool(
+                r.get("is_exploitable", False)
+            )
+
     # Consensus (if configured)
     consensus_models = role_resolution.get("consensus_models", [])
     consensus_budget_skipped = False
+    consensus_all_errored = False
     if consensus_models:
         consensus_task = ConsensusTask(profile=profile)
         eligible = consensus_task.select_items(findings, results_by_id)
+        # Snapshot the cost tracker state BEFORE dispatch so we can
+        # tell budget-skipped (no spend) from all-errored (spend
+        # incurred but every call failed) afterwards.
+        _ct_before = cost_tracker.total_cost_usd if cost_tracker else 0.0
         dispatch_task(
             consensus_task, findings, dispatch_fn, role_resolution,
             results_by_id, cost_tracker, max_parallel,
         )
+        # Pre-fix the post-dispatch check was:
+        #
+        #   if eligible and not any(... r.get("consensus") ...):
+        #       consensus_budget_skipped = True
+        #
+        # That branch fires for TWO distinct outcomes:
+        #
+        #   (1) Budget cap hit — dispatch never made any LLM calls
+        #       for the eligible set (cost_tracker spend == 0
+        #       across the consensus stage).
+        #   (2) Every call ERRORED — dispatch made N LLM calls,
+        #       all returned an error envelope, no `consensus`
+        #       field landed on any finding.
+        #
+        # Both reach "no consensus on the findings" but the
+        # operator's response is opposite: (1) means "raise the
+        # consensus budget", (2) means "investigate the API
+        # failures". Pre-fix both got reported as "budget skipped"
+        # in the orchestration summary, masking errors.
+        #
+        # Distinguish via spend delta: if the cost tracker
+        # advanced, calls were made; the absence of consensus is
+        # all-errored. If spend stayed flat, it's budget-skipped.
         if eligible and not any(
             isinstance(r, dict) and r.get("consensus")
             for r in results_by_id.values()
         ):
-            consensus_budget_skipped = True
+            _ct_after = cost_tracker.total_cost_usd if cost_tracker else 0.0
+            if _ct_after > _ct_before:
+                consensus_all_errored = True
+            else:
+                consensus_budget_skipped = True
 
     # Judge review (if configured) — sees primary reasoning, critiques it
     judge_models = role_resolution.get("judge_models", [])
     if judge_models:
-        # Snapshot primary verdicts BEFORE JudgeTask runs — its
-        # finalize() overwrites ``primary["is_exploitable"]`` with
-        # the panel-majority verdict. The JUDGE_REVIEW producer
-        # below needs the original to know which way primary voted.
-        primary_verdicts_before_judge: Dict[str, bool] = {}
+        # Use the pre-consensus snapshot so JUDGE_REVIEW producer
+        # sees the actual primary verdict, not the consensus-
+        # overridden one. Falls back to the post-consensus state
+        # for findings that didn't exist pre-consensus (shouldn't
+        # happen in normal flow, but defensive).
+        primary_verdicts_before_judge: Dict[str, bool] = dict(
+            primary_verdicts_pre_consensus
+        )
         for fid, r in results_by_id.items():
-            if isinstance(r, dict) and "error" not in r:
+            if (fid not in primary_verdicts_before_judge
+                    and isinstance(r, dict) and "error" not in r):
                 primary_verdicts_before_judge[fid] = bool(
                     r.get("is_exploitable", False)
                 )
@@ -936,6 +1077,11 @@ def orchestrate(
         "consensus_agreed": consensus_agreed,
         "consensus_disputes": consensus_disputes,
         "consensus_budget_skipped": consensus_budget_skipped,
+        # New: distinguish "budget capped before any LLM calls"
+        # from "calls made but all errored". Operators reading the
+        # report need to act differently on each — the existing
+        # `consensus_budget_skipped` flag was conflating both.
+        "consensus_all_errored": consensus_all_errored,
         "judge_models": [m.model_name for m in judge_models],
         "judge_agreed": judge_agreed,
         "judge_disputes": judge_disputes,

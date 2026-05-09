@@ -191,8 +191,29 @@ def _safe_id(finding_id: str) -> str:
     # cosmetic, but keeps the filename predictable).
     sanitised = sanitised.replace("..", "_")
     if len(sanitised) > _SAFE_ID_MAX:
-        # Truncate from the right, keeping prefix for human readability.
-        sanitised = sanitised[:_SAFE_ID_MAX]
+        # Pre-fix the truncation was a bare `sanitised[:_SAFE_ID_MAX]`,
+        # which lost any disambiguation in the truncated tail.
+        # Two finding_ids differing only in chars beyond position
+        # 80 (vendor-rule URIs in SARIF often share a common
+        # prefix and disambiguate by trailing rule/ID/SHA) then
+        # sanitise to the SAME truncated string — second
+        # finding's debug file CLOBBERS the first's, losing
+        # debug evidence for the earlier finding. Operators
+        # debugging "why didn't this CC dispatch produce
+        # output?" looked at the file for finding A and saw
+        # finding B's output instead.
+        #
+        # Append a short hash suffix derived from the FULL
+        # finding_id so collisions are statistically unlikely
+        # (8 hex chars from sha256 = 1 in ~4 billion). Trim the
+        # prefix to leave room for the `_<hash>` suffix:
+        #
+        #   prefix(_SAFE_ID_MAX - 9) + "_" + 8-hex
+        import hashlib as __hashlib
+        _suffix = "_" + __hashlib.sha256(
+            finding_id.encode("utf-8", errors="replace"),
+        ).hexdigest()[:8]
+        sanitised = sanitised[:_SAFE_ID_MAX - len(_suffix)] + _suffix
     return sanitised or "unknown"
 
 
