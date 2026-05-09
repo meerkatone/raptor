@@ -851,7 +851,17 @@ for i, src in enumerate(FILES):
         sys.stderr.buffer.write(captured)
         if proc.stderr is not None and len(captured) >= _STDERR_CAP:
             sys.stderr.buffer.write(
-                f"\\n[truncated to first {_STDERR_CAP // 1024} KB]\\n".encode()
+                # Doubled braces escape in the OUTER template so the
+                # generated script gets a literal brace pair (runtime
+                # f-string reference to the script-local _STDERR_CAP),
+                # NOT an outer-scope substitution. Pre-fix the single
+                # braces let the OUTER f-string evaluate _STDERR_CAP
+                # at template-generation time, which raised NameError
+                # because _STDERR_CAP only exists in the GENERATED
+                # script scope. (Note: keep this comment free of
+                # triple-quotes — the outer template uses triple
+                # single-quotes.)
+                f"\\n[truncated to first {{_STDERR_CAP // 1024}} KB]\\n".encode()
             )
 
 print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
