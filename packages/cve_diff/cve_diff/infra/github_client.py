@@ -356,7 +356,17 @@ def get_parent_commit_files(slug: str, sha: str) -> Optional[list[str]]:
 
 
 def reset_for_tests() -> None:
-    """Flush memoization + warning state. Tests only."""
+    """Flush memoization + warning state. Tests only.
+
+    Take `_warn_lock` for the warning-flag writes. Pre-fix the
+    `_warned_token_missing = False` / `_warned_rate_limited = False`
+    assignments ran without the lock — a parallel test that called
+    `_warn_token_missing()` (which acquires `_warn_lock`) at the
+    same instant could observe a torn state where one flag was
+    reset and the other wasn't, producing duplicate warnings the
+    test-suite invariant didn't expect. Same lock the warning
+    setters use; same atomicity guarantee.
+    """
     global _warned_token_missing, _warned_rate_limited
     # ``hasattr`` guard: tests may monkeypatch ``_client`` to a plain
     # function or stub that doesn't expose ``cache_clear``.
@@ -366,5 +376,6 @@ def reset_for_tests() -> None:
     ):
         if hasattr(fn, "cache_clear"):
             fn.cache_clear()
-    _warned_token_missing = False
-    _warned_rate_limited = False
+    with _warn_lock:
+        _warned_token_missing = False
+        _warned_rate_limited = False
