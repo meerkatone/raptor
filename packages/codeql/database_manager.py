@@ -658,8 +658,38 @@ class DatabaseManager:
             f"--source-root={repo_path}",
         ]
 
-        # Set working directory and environment
+        # Set working directory and environment.
+        #
+        # `os.access(working_dir, os.X_OK)` check before passing to
+        # subprocess. A directory must have execute permission for a
+        # process to chdir into it; without it, subprocess.run with
+        # `cwd=working_dir` fails with PermissionError that the caller
+        # sees only as "build failed". The common cause is a noexec
+        # mount: shared CI runners that mount the build area noexec for
+        # security, or `/tmp` mounted noexec on hardened hosts. Surface
+        # the issue with an actionable message instead of a generic
+        # subprocess error. Skip on platforms without POSIX
+        # permission semantics (Windows: os.access semantics differ
+        # but the noexec hazard doesn't apply the same way).
         working_dir = build_system.working_dir if build_system else repo_path
+        if (
+            os.name == "posix"
+            and not os.access(working_dir, os.X_OK)
+        ):
+            return DatabaseResult(
+                success=False,
+                language=language,
+                database_path="",
+                metadata=None,
+                errors=[
+                    f"working_dir {working_dir!r} lacks execute permission "
+                    f"(POSIX dir-exec). Common cause: noexec mount on the "
+                    f"build area. Re-mount with exec, or move the build "
+                    f"into a directory that has it (e.g. $HOME)."
+                ],
+                duration_seconds=time.time() - start_time,
+                cached=False,
+            )
         env = RaptorConfig.get_safe_env()
         if build_system and build_system.env_vars:
             # Filter build env vars through the same blocklist — a malicious
