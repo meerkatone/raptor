@@ -534,7 +534,47 @@ def setup_env_file():
         if not _has_export("RAPTOR_DIR"):
             additions.append(f'export RAPTOR_DIR="{repo_root}"')
         if additions:
-            with open(env_file, "a") as f:
+            # Open with O_NOFOLLOW so an attacker (or hostile
+            # CLAUDE_ENV_FILE value) pointing at a symlink to
+            # `~/.bashrc`, `~/.bash_profile`, or any other shell
+            # rc file CAN'T cause us to append `export PATH=...`
+            # / `export RAPTOR_DIR=...` lines into the operator's
+            # actual shell init. The CLAUDE_ENV_FILE contract is
+            # "Claude's per-session env stub" — never a symlink to
+            # operator config.
+            #
+            # Pre-fix `open(env_file, "a")` followed symlinks by
+            # default. A malicious launcher (or a poisoned CI
+            # environment that set CLAUDE_ENV_FILE=$HOME/.bashrc
+            # before invoking RAPTOR) would have had RAPTOR
+            # silently append exports into the operator's shell
+            # init, persisting the path injection across all
+            # future shells.
+            #
+            # ELOOP / ENOTSUP / OSError → fall through to the
+            # outer except OSError, which already swallows the
+            # error. Operator-visible behaviour: the env_file
+            # update silently no-ops when the path is a symlink
+            # — preferable to silently mutating ~/.bashrc.
+            try:
+                # O_CREAT so first-time setup creates the env_file.
+                # O_NOFOLLOW refuses to follow a symlink AT the
+                # final path component when the file already
+                # exists; for new file creation O_NOFOLLOW is
+                # silently no-op (no symlink to follow). 0o600
+                # mode for new files (CLAUDE_ENV_FILE may carry
+                # PATH entries operator wouldn't share publicly).
+                fd = os.open(
+                    env_file,
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                    | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                )
+            except OSError:
+                # Symlink, bad perms, or path now missing —
+                # leave env_file alone.
+                return
+            with os.fdopen(fd, "a") as f:
                 f.write("\n".join(additions) + "\n")
     except OSError:
         pass
