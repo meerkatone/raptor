@@ -1117,11 +1117,34 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             try:
                 data = json.loads(content)
             except json.JSONDecodeError:
-                try:
-                    idx = content.index("{")
-                    data = json.loads(content[idx:])
-                except (ValueError, json.JSONDecodeError):
-                    logger.debug("CC output wasn't valid JSON")
+                # Recover by scanning forward through `{` positions and
+                # picking the FIRST one whose tail JSON-parses cleanly.
+                # Pre-fix `idx = content.index("{")` always picked the
+                # first `{` — but LLM prose with embedded `{` glyphs
+                # ("the function takes { foo, bar } as params, here is
+                # the JSON: {valid}") parsed from the wrong position
+                # and silently dropped the real answer. Bound the
+                # scan at 16 attempts so a CC output full of literal
+                # `{` glyphs (a list of code samples) doesn't burn
+                # measurable wallclock retrying.
+                data = None
+                _attempts = 0
+                _start = 0
+                while _attempts < 16:
+                    idx = content.find("{", _start)
+                    if idx < 0:
+                        break
+                    try:
+                        data = json.loads(content[idx:])
+                        break
+                    except (ValueError, json.JSONDecodeError):
+                        _start = idx + 1
+                        _attempts += 1
+                if data is None:
+                    logger.debug(
+                        "CC output wasn't valid JSON after %d brace probes",
+                        _attempts,
+                    )
                     return None
 
             # Pre-fix `data.get("includes", [])` returned the
