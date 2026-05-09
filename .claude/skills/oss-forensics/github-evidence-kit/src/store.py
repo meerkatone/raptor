@@ -148,8 +148,24 @@ class EvidenceStore:
 
     @classmethod
     def load(cls, path: str | Path) -> "EvidenceStore":
-        """Load store from JSON file."""
-        return cls.from_json(Path(path).read_text())
+        """Load store from JSON file.
+
+        Explicit `encoding="utf-8-sig"` so:
+          * The read uses UTF-8 regardless of the host locale's default
+            encoding (`locale.getpreferredencoding()` returns cp1252
+            on a Windows host, latin-1 on some C-locale containers).
+            Pre-fix the bare `read_text()` would mangle non-ASCII
+            bytes in evidence content (commit messages with
+            accented chars, unicode usernames, BOM-prefixed JSON
+            from some tools) silently or raise UnicodeDecodeError.
+          * `utf-8-sig` is a strict superset of `utf-8` — identical
+            for BOM-less files, transparent for BOM-prefixed ones.
+            Some Windows-edited evidence JSON files carry a leading
+            BOM that the JSON parser would reject as
+            "Expecting value: line 1 column 1 (char 0)" with no hint
+            that the encoding is the actual problem.
+        """
+        return cls.from_json(Path(path).read_text(encoding="utf-8-sig"))
 
     def merge(self, other: "EvidenceStore") -> None:
         """Merge another store into this one."""
