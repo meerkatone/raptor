@@ -259,8 +259,19 @@ class CExtractor:
     risk breaking existing extraction).
     """
 
+    # `[\w\s\*]+` is greedy and overlaps the following `\s+` (both match
+    # space). On a line that's a long run of word/space chars without a
+    # following `{` or `(`, the engine must try every backtrack position
+    # before declaring no-match. Pathological input
+    # (e.g. `"a" * 50000 + "\n"`) made `re.match` quadratic in line
+    # length. C source lines aren't longer than ~10 KB in practice (per
+    # most house style guides); cap the per-line input at `_MAX_C_LINE`
+    # before running the matcher so a stray minified file or a
+    # generated source dump (single-line concatenated declarations)
+    # can't hang inventory.
     ANSI_PATTERN = r'^(?:[\w\s\*]+)\s+(\w+)\s*\([^;]*\)\s*\{'
     ANSI_SPLIT_PATTERN = r'^(?:[\w\s\*]+)\s+(\w+)\s*\([^;{]*\)\s*$'
+    _MAX_C_LINE = 16 * 1024
     KNR_FUNCNAME = r'^(\w+)\s*\([\w\s,]*\)\s*$'
     FUNCNAME_OPEN_PAREN = r'^(\w+)\s*\([^)]*$'
 
@@ -306,6 +317,12 @@ class CExtractor:
 
             stripped = line.strip()
             if stripped.startswith('#') or stripped.startswith('//'):
+                i += 1
+                continue
+
+            # Cap line length before regex match — see ANSI_PATTERN
+            # comment for the ReDoS rationale.
+            if len(line) > self._MAX_C_LINE:
                 i += 1
                 continue
 
