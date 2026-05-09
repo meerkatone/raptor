@@ -437,7 +437,24 @@ def show_mode_help(mode: str) -> None:
         return
     
     print(f"\n[*] Help for mode: {mode}\n")
-    subprocess.run([sys.executable, str(script_path), "--help"])
+    # `env=` to a stripped environment so the help-rendering
+    # subprocess doesn't inherit the parent's full env. Pre-fix the
+    # bare subprocess.run carried LD_PRELOAD / LD_LIBRARY_PATH /
+    # PYTHONPATH through to the spawned `python3 raptor_<mode>.py
+    # --help` — irrelevant for the help text itself but a
+    # consistency hazard with the rest of raptor.py's spawn paths
+    # (which all use safe env). `timeout=10` so a wedged help-text
+    # rendering (rare, but a script with a side-effect import that
+    # blocks at import time would hang the operator's terminal)
+    # doesn't pin the shell.
+    try:
+        subprocess.run(
+            [sys.executable, str(script_path), "--help"],
+            env=RaptorConfig.get_safe_env(),
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"✗ Help rendering for {mode} timed out after 10s")
 
 
 # Help epilog used by both the no-args path and the explicit
