@@ -114,6 +114,13 @@ class AgentLoop:
         unverified_submits = 0
         not_found_submits = 0
         last_dispatched_input: list[dict[str, Any] | None] = [None]
+        # call.id → call.name index, populated on ToolCallDispatched
+        # and consumed (popped) on ToolCallReturned. See the
+        # ToolCallReturned arm in _on_event for the rationale —
+        # call_id matching is correct under parallel dispatch and
+        # out-of-order returns; the prior `tool_call_log[-1]`
+        # ("most recent") was correct only for strictly serial.
+        _dispatch_index: dict[str, str] = {}
         # Set to non-None when a submit gate wants to hard-stop the loop.
         gate_hard_stop_reason: list[str | None] = [None]
         # The final accepted submit payload.
@@ -236,11 +243,34 @@ class AgentLoop:
                 args_repr = json.dumps(call.input, sort_keys=True, default=str)[:120]
                 tool_calls_with_args.append((call.name, args_repr))
                 last_dispatched_input[0] = call.input
+                # Index by call_id so ToolCallReturned can look up the
+                # correct dispatch even when calls overlap (parallel
+                # tool dispatch). See _on_event ToolCallReturned arm.
+                _dispatch_index[call.id] = call.name
 
             elif isinstance(event, ToolCallReturned):
                 result = event.result
-                # Find which tool this was from the most recent dispatch
-                call_name = tool_call_log[-1] if tool_call_log else ""
+                # Match the result back to its dispatch by call_id.
+                # Pre-fix this used `tool_call_log[-1]` ("most recent
+                # dispatch"), which is correct ONLY for strictly serial
+                # tool dispatch. The cve-diff agent loop supports
+                # parallel tool calls (one TurnCompleted can emit
+                # multiple ToolCallDispatched events before any
+                # ToolCallReturned arrives), and even in serial mode
+                # the order of returns is not guaranteed to match
+                # dispatch order across re-tries or async callbacks.
+                # The result of misattribution: the verification-chain
+                # dict (keyed on call_name == "gh_commit_detail" /
+                # "cgit_fetch" / "gitlab_commit") parsed responses
+                # under the WRONG schema — a gh_commit_detail JSON
+                # payload run through the gitlab_commit branch failed
+                # silently in the except clause and the (slug, sha)
+                # never landed in `verified`, leaving the
+                # consensus check short of evidence it had actually
+                # received. Symptom: agent submits unsupported/
+                # no_evidence on cases where the verification call
+                # actually succeeded.
+                call_name = _dispatch_index.pop(event.call_id, "")
                 # Cap before json.loads. Pre-fix the parser ate
                 # whatever the tool returned — `gh_commit_detail`
                 # response from a hostile / malformed cgit mirror,
