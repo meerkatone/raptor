@@ -175,7 +175,7 @@ def render_directory(out_dir: Path, target: Optional[str] = None) -> str:
             hyp_list = raw if isinstance(raw, list) else raw.get("hypotheses", [])
             if hyp_list:
                 diagram = hypotheses.generate(hyp_list)
-                body = "_Source: `hypotheses.json`_\n\n```mermaid\n{diagram}\n```".format(diagram=diagram)
+                body = f"_Source: `hypotheses.json`_\n\n```mermaid\n{diagram}\n```"
                 sections.append(_section("Hypotheses,Evidence Chain", body))
         except Exception as exc:
             sections.append(_section("Hypotheses,Evidence Chain", f"> Could not render `hypotheses.json`: {exc}"))
