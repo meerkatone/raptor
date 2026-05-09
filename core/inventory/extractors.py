@@ -486,7 +486,13 @@ class GoExtractor:
     syntax can't be parsed reliably with regex), return types.
     """
 
-    PATTERN = r'^func\s+(?:\((\w+)\s+(\*?\w+)\)\s+)?(\w+)\s*\('
+    # `(?a)` (re.ASCII) so `\w` matches only ASCII identifiers. Go's
+    # language spec restricts identifiers to ASCII; without `re.ASCII`,
+    # Python's `\w` admits Unicode word characters and would capture
+    # a Cyrillic homoglyph as a "function name", surfacing into the
+    # inventory under a name that visually matches a real ASCII
+    # identifier — confusing greps and downstream cross-references.
+    PATTERN = r'(?a)^func\s+(?:\((\w+)\s+(\*?\w+)\)\s+)?(\w+)\s*\('
 
     def extract(self, filepath: str, content: str) -> List[FunctionInfo]:
         functions = []
