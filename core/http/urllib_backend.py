@@ -69,12 +69,24 @@ logger = logging.getLogger(__name__)
 # the caller's budget.
 _BACKOFF_SECONDS = (1, 2, 5, 15, 60, 300)
 # One schedule slot per attempt (initial + retries). Default attempt
-# count is therefore len(schedule) and matches DEFAULT_RETRIES + 1 —
-# the assert catches drift if either side is retuned without the other.
-assert len(_BACKOFF_SECONDS) == DEFAULT_RETRIES + 1, (
-    "_BACKOFF_SECONDS length must equal DEFAULT_RETRIES + 1 (one slot "
-    "for the initial attempt + one per retry); update both together"
-)
+# count is therefore len(schedule) and matches DEFAULT_RETRIES + 1.
+#
+# Pre-fix this was an `assert` statement. `python -O` (production
+# deployments that disable assertions for perf) strips assert
+# statements at bytecode-compile time — so the drift guard simply
+# wasn't there in optimised builds. A future maintainer who tuned
+# `DEFAULT_RETRIES` without touching `_BACKOFF_SECONDS` (or vice
+# versa) would see local dev tests pass (assert fires, they fix the
+# tuple) but production silently use a mismatched schedule:
+# `_BACKOFF_SECONDS[attempt]` IndexError on the over-budget retry,
+# or a schedule slot never reached. Lift to an explicit RuntimeError
+# so the gate fires regardless of `-O`.
+if len(_BACKOFF_SECONDS) != DEFAULT_RETRIES + 1:
+    raise RuntimeError(
+        f"_BACKOFF_SECONDS length ({len(_BACKOFF_SECONDS)}) must equal "
+        f"DEFAULT_RETRIES + 1 ({DEFAULT_RETRIES + 1}) — one slot for the "
+        f"initial attempt + one per retry; update both together"
+    )
 
 
 def _safe_url_for_log(url: str) -> str:
