@@ -304,6 +304,22 @@ class UrllibClient:
             circuit_breaker = _default_circuit_breaker()
         self._circuit_breaker = circuit_breaker
 
+    # Hard cap on URL length. Browsers cap at ~2-8 KB depending on
+    # vendor; HTTP RFC has no explicit limit but server / proxy /
+    # log-aggregator stacks (nginx default 8 KB request line, AWS
+    # ALB 16 KB, common log shippers truncating at 4-16 KB) all
+    # break down past low-tens-of-KB. Pre-fix RAPTOR had no
+    # client-side cap, so a caller bug (URL built from an unbounded
+    # template, attacker-influenced query string concatenated
+    # without truncation) could send multi-megabyte URLs that
+    # urllib3 would happily build into a request — DoS the
+    # destination, get truncated mid-line by intermediaries
+    # (causing parser confusion at the server), or simply waste
+    # the local connection slot. 64 KB is comfortably above any
+    # legitimate use (typical OAuth callback URLs with state +
+    # PKCE are ~1.5 KB) and well below the smallest infra cap.
+    _MAX_URL_BYTES = 64 * 1024
+
     def _validate_url(self, url: str) -> _urlparse.SplitResult:
         """Reject URLs that don't match (allowed-scheme)://host/...
 
@@ -318,6 +334,15 @@ class UrllibClient:
         ``is not None`` check catches the empty-string variant returned
         by urlsplit for adversarial forms like ``http://@evil.com/``.
         """
+        # Length cap BEFORE urlsplit so a giant input doesn't burn
+        # CPU through the parser before the rejection lands. Compare
+        # encoded bytes (ASCII + percent-encoded) since wire-length
+        # is the operationally-meaningful unit.
+        if len(url.encode("utf-8", errors="ignore")) > self._MAX_URL_BYTES:
+            raise HttpError(
+                f"Refused URL exceeding {self._MAX_URL_BYTES}-byte cap "
+                f"(input was {len(url)} chars)"
+            )
         # Pre-fix `_urlparse.urlsplit(url)` raised ValueError
         # directly for malformed inputs:
         #
