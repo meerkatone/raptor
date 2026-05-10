@@ -528,7 +528,14 @@ class TestRetryAfter:
         ("  10  ", 10),     # whitespace tolerated
         ("0", 1),           # clamped to min 1
         ("99999", 1800),    # clamped to max 30min
-        ("Mon, 01 Jan 2030 00:00:00 GMT", None),   # HTTP-date — not supported
+        # HTTP-date form: a far-future date clamps to the 1800s
+        # ceiling. Per RFC 7231 §7.1.3 both the seconds and date
+        # forms are valid Retry-After values.
+        ("Mon, 01 Jan 2030 00:00:00 GMT", 1800),
+        # HTTP-date in the past → the delta is negative; clamps
+        # to the 1s floor (don't loop instantly).
+        ("Mon, 01 Jan 2000 00:00:00 GMT", 1),
+        ("garbage", None),  # neither integer nor parseable date
         (None, None),
         ("", None),
     ])

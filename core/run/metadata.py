@@ -320,10 +320,42 @@ def _setup_checklist_symlink(run_dir: Path) -> None:
         _promote_checklist(project_dir)
 
     # Create relative symlink: run_dir/checklist.json → ../checklist.json
+    #
+    # TOCTOU window note: between the existence check above and the
+    # symlink_to call below, a parallel start_run() (same project,
+    # same wall-clock instant) can race in and create EITHER a real
+    # file or a symlink at this path. `symlink_to` then raises
+    # FileExistsError, caught by the except below.
+    #
+    # Pre-fix `except OSError: pass` swallowed that silently. Two
+    # downstream consequences:
+    #   * Operator debugging "why is my run dir missing the
+    #     checklist symlink" had no log signal — they had to read
+    #     the source to find this branch.
+    #   * EACCES, ENOSPC, EROFS (real failure modes that aren't
+    #     a race) were also silently swallowed, masking real
+    #     project-state corruption.
+    #
+    # Log at debug for the race case (FileExistsError), warning for
+    # real OS failures so operators can grep for them.
     try:
         checklist_in_run.symlink_to("../checklist.json")
-    except OSError:
-        pass  # Silently skip if symlink creation fails
+    except FileExistsError:
+        # Lost the race — the other process's checklist (real or
+        # symlinked) is now in place. Either is correct end state;
+        # debug-log so the race is visible if anyone looks.
+        from core.logging import get_logger
+        get_logger(__name__).debug(
+            "checklist symlink already created by parallel start_run "
+            "in %s — leaving it in place", run_dir,
+        )
+    except OSError as exc:
+        from core.logging import get_logger
+        get_logger(__name__).warning(
+            "checklist symlink creation failed in %s (%s) — "
+            "downstream consumers will see no checklist for this run",
+            run_dir, exc,
+        )
 
 
 def _promote_checklist(project_dir: Path) -> None:
@@ -346,8 +378,20 @@ def _promote_checklist(project_dir: Path) -> None:
         except OSError:
             return 0.0
 
+    # Sort key: (mtime, name) so identical mtimes break deterministically
+    # by directory name. Pre-fix the sort was on `_safe_mtime` alone;
+    # filesystems with second-resolution timestamps (or two start_run()
+    # calls in the same wall-clock second under unique_run_suffix's
+    # 4-digit ns tail) produced ties whose ordering then depended on
+    # `iterdir()`'s undefined traversal order. The "newest" checklist
+    # promoted to the project level then varied across re-promotion
+    # passes for the SAME on-disk state — operators saw checked_by
+    # state mysteriously disappear / reappear because a different
+    # checklist became "newest" each time. Run-dir names embed a
+    # PID + monotonic-ns tail (see core/run/output.unique_run_suffix),
+    # so name-tie-break gives a chronologically meaningful disambiguation.
     checklists = []
-    for d in sorted(children, key=_safe_mtime, reverse=True):
+    for d in sorted(children, key=lambda d: (_safe_mtime(d), d.name), reverse=True):
         try:
             if not d.is_dir() or d.name.startswith((".", "_")):
                 continue
@@ -654,8 +698,24 @@ def parse_timestamp_from_name(name: str) -> Optional[str]:
     - scan_vulns_20260406_100000
     - exploitability-validation-20260406-100000
     """
+    # `re.ASCII` so `\d` matches only ASCII digits. Pre-fix `\d` was
+    # Unicode-aware by default, admitting Devanagari / Arabic-Indic
+    # / fullwidth digit characters. A directory named with mixed
+    # ASCII + Unicode digits (rare but possible if an operator
+    # copies a path through a tool that re-encodes glyphs, or a
+    # CI-system-generated name templates with locale-aware
+    # formatting) would parse via `int(y)` — which DOES accept
+    # Unicode digits and produces the corresponding integer value.
+    # The directory name then "looks like" a timestamp the parser
+    # accepts, even though grep / human-readable filtering treats
+    # the chars as different. Anchoring to ASCII keeps the
+    # timestamp-parsed-from-name <-> timestamp-rendered-to-name
+    # mapping deterministic.
     # Look for YYYYMMDD_HHMMSS or YYYYMMDD-HHMMSS
-    match = re.search(r'(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})', name)
+    match = re.search(
+        r'(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})',
+        name, re.ASCII,
+    )
     if match:
         y, mo, d, h, mi, s = match.groups()
         try:
@@ -665,7 +725,7 @@ def parse_timestamp_from_name(name: str) -> Optional[str]:
             pass
 
     # Look for YYYYMMDD only
-    match = re.search(r'(\d{4})(\d{2})(\d{2})', name)
+    match = re.search(r'(\d{4})(\d{2})(\d{2})', name, re.ASCII)
     if match:
         y, mo, d = match.groups()
         try:

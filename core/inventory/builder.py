@@ -337,12 +337,34 @@ def _collect_source_files(
 
     file_list: List[Path] = []
     pruned_dirs: List[Dict[str, Any]] = []
+    # Hidden-dir whitelist: pre-fix the blanket `d.startswith('.')`
+    # check pruned EVERY dot-dir, including ones that legitimately
+    # carry analysable security-relevant source. Concrete misses:
+    #
+    #   * `.github/workflows/` — CI definitions (YAML / JSON).
+    #     Workflow injection (`pull_request_target` + untrusted
+    #     event data) is one of the most common GitHub-hosted
+    #     supply-chain bug classes; pruning the directory hid
+    #     every workflow file from the inventory and downstream
+    #     scanners couldn't find them.
+    #   * `.gitlab/` / `.gitlab-ci/` — same story for GitLab CI.
+    #
+    # Other dot-dirs (`.git/`, `.cache/`, `.venv/`, `.tox/`,
+    # `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `.idea/`,
+    # `.vscode/`, `.gradle/`, etc.) remain pruned — they're either
+    # VCS metadata, tool caches, or editor state with no security
+    # value.
+    _HIDDEN_DIR_WHITELIST = frozenset({
+        ".github",
+        ".gitlab",
+        ".gitlab-ci",
+    })
     for root, dirs, files in os.walk(target):
         # Skip hidden directories, symlinked directories, AND any directory
         # that matches a DEFAULT_EXCLUDES dir-shaped pattern.
         kept_dirs = []
         for d in dirs:
-            if d.startswith('.'):
+            if d.startswith('.') and d not in _HIDDEN_DIR_WHITELIST:
                 continue
             if (Path(root) / d).is_symlink():
                 continue

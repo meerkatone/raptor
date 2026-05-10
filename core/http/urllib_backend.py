@@ -32,6 +32,7 @@ import gzip
 import io
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -69,12 +70,24 @@ logger = logging.getLogger(__name__)
 # the caller's budget.
 _BACKOFF_SECONDS = (1, 2, 5, 15, 60, 300)
 # One schedule slot per attempt (initial + retries). Default attempt
-# count is therefore len(schedule) and matches DEFAULT_RETRIES + 1 —
-# the assert catches drift if either side is retuned without the other.
-assert len(_BACKOFF_SECONDS) == DEFAULT_RETRIES + 1, (
-    "_BACKOFF_SECONDS length must equal DEFAULT_RETRIES + 1 (one slot "
-    "for the initial attempt + one per retry); update both together"
-)
+# count is therefore len(schedule) and matches DEFAULT_RETRIES + 1.
+#
+# Pre-fix this was an `assert` statement. `python -O` (production
+# deployments that disable assertions for perf) strips assert
+# statements at bytecode-compile time — so the drift guard simply
+# wasn't there in optimised builds. A future maintainer who tuned
+# `DEFAULT_RETRIES` without touching `_BACKOFF_SECONDS` (or vice
+# versa) would see local dev tests pass (assert fires, they fix the
+# tuple) but production silently use a mismatched schedule:
+# `_BACKOFF_SECONDS[attempt]` IndexError on the over-budget retry,
+# or a schedule slot never reached. Lift to an explicit RuntimeError
+# so the gate fires regardless of `-O`.
+if len(_BACKOFF_SECONDS) != DEFAULT_RETRIES + 1:
+    raise RuntimeError(
+        f"_BACKOFF_SECONDS length ({len(_BACKOFF_SECONDS)}) must equal "
+        f"DEFAULT_RETRIES + 1 ({DEFAULT_RETRIES + 1}) — one slot for the "
+        f"initial attempt + one per retry; update both together"
+    )
 
 
 def _safe_url_for_log(url: str) -> str:
@@ -292,6 +305,22 @@ class UrllibClient:
             circuit_breaker = _default_circuit_breaker()
         self._circuit_breaker = circuit_breaker
 
+    # Hard cap on URL length. Browsers cap at ~2-8 KB depending on
+    # vendor; HTTP RFC has no explicit limit but server / proxy /
+    # log-aggregator stacks (nginx default 8 KB request line, AWS
+    # ALB 16 KB, common log shippers truncating at 4-16 KB) all
+    # break down past low-tens-of-KB. Pre-fix RAPTOR had no
+    # client-side cap, so a caller bug (URL built from an unbounded
+    # template, attacker-influenced query string concatenated
+    # without truncation) could send multi-megabyte URLs that
+    # urllib3 would happily build into a request — DoS the
+    # destination, get truncated mid-line by intermediaries
+    # (causing parser confusion at the server), or simply waste
+    # the local connection slot. 64 KB is comfortably above any
+    # legitimate use (typical OAuth callback URLs with state +
+    # PKCE are ~1.5 KB) and well below the smallest infra cap.
+    _MAX_URL_BYTES = 64 * 1024
+
     def _validate_url(self, url: str) -> _urlparse.SplitResult:
         """Reject URLs that don't match (allowed-scheme)://host/...
 
@@ -306,6 +335,15 @@ class UrllibClient:
         ``is not None`` check catches the empty-string variant returned
         by urlsplit for adversarial forms like ``http://@evil.com/``.
         """
+        # Length cap BEFORE urlsplit so a giant input doesn't burn
+        # CPU through the parser before the rejection lands. Compare
+        # encoded bytes (ASCII + percent-encoded) since wire-length
+        # is the operationally-meaningful unit.
+        if len(url.encode("utf-8", errors="ignore")) > self._MAX_URL_BYTES:
+            raise HttpError(
+                f"Refused URL exceeding {self._MAX_URL_BYTES}-byte cap "
+                f"(input was {len(url)} chars)"
+            )
         # Pre-fix `_urlparse.urlsplit(url)` raised ValueError
         # directly for malformed inputs:
         #
@@ -612,6 +650,18 @@ class UrllibClient:
                     )
                 yield chunk
         finally:
+            # Same drain-then-release pattern as `_fetch_once`: a
+            # SizeLimitExceeded / TimeoutError raised mid-stream
+            # leaves bytes in the socket buffer. Releasing without
+            # draining poisons the pool — the next request that
+            # picks up the connection sees the leftover bytes
+            # prepended to its OWN response. Drain (urllib3 caps
+            # internally at ~64KB), then release.
+            try:
+                if hasattr(resp, "drain_conn"):
+                    resp.drain_conn()
+            except Exception:
+                pass
             # Released whether the generator was fully consumed,
             # garbage-collected mid-stream, or .close()-d explicitly.
             resp.release_conn()
@@ -667,7 +717,17 @@ class UrllibClient:
 
         last_exc: Optional[Exception] = None
         for attempt, delay in enumerate(schedule):
-            if time.monotonic() >= deadline:
+            # Deadline gate. Pre-fix the check was unconditional and
+            # used `>=`, which fired BEFORE the first attempt when
+            # `total_timeout == 0` (deadline = monotonic() + 0, then
+            # `monotonic() >= deadline` is immediately True at the
+            # top of the first iteration). The caller saw a "total
+            # timeout exceeded" error without any attempt being
+            # made — useless, since 0 here is most meaningfully read
+            # as "single attempt, no retry budget", not "no time at
+            # all". Skip the gate on attempt==0 so the first try
+            # always runs; check on subsequent iterations only.
+            if attempt > 0 and time.monotonic() >= deadline:
                 raise HttpError(
                     f"Total timeout ({total_timeout}s) exceeded for "
                     f"{_safe_url_for_log(url)}",
@@ -739,16 +799,39 @@ class UrllibClient:
                 # Distinguish "proxy denied CONNECT" (permanent, our
                 # chokepoint refused the host as off-allowlist) from
                 # "proxy unreachable" (transient). urllib3 surfaces
-                # both as ProxyError with a message; we string-match
-                # for the 403/Forbidden marker the in-process proxy
-                # emits at core/sandbox/proxy.py for off-allowlist
-                # hosts. Permanent errors must NOT loop through the
-                # backoff schedule (minutes of wasted sleep); raise now.
-                # Lower-case the haystack so a future urllib3 release
-                # changing the message casing doesn't silently turn
-                # "off-allowlist" into a transient-retry storm.
+                # both as ProxyError with a message; we have to
+                # pattern-match the message because ProxyError
+                # doesn't expose the upstream status code structurally.
+                #
+                # Pre-fix the test was `"403" in msg or "forbidden"
+                # in msg`. Two false-positive shapes:
+                #   * Proxy unreachable error containing "403" in
+                #     the URL fragment of the connect target
+                #     (`https://example.com/v1/403/something`) —
+                #     misclassified as permanent, retry skipped.
+                #   * Proxy connectivity message naming the status
+                #     code in prose: `"upstream returned 403 (after
+                #     N retries)"` for a server that legitimately
+                #     emitted 403 NOT from the chokepoint allowlist
+                #     enforcement — also misclassified.
+                #
+                # Tighten by anchoring to a status-code pattern:
+                # `403`/`Forbidden` must appear next to a plausible
+                # HTTP-status context word, not just as a bare
+                # substring. The chokepoint message at
+                # core/sandbox/proxy.py emits
+                # "Tunnel connection failed: 403 Forbidden" — both
+                # the status word and a leading ":" or status
+                # context are present, so tighten to require BOTH.
                 msg = str(e).lower()
-                if "403" in msg or "forbidden" in msg:
+                _has_403_status = bool(
+                    re.search(r'(?:status|http|tunnel|response)[^\n]{0,40}\b403\b',
+                              msg)
+                )
+                _has_forbidden_status = bool(
+                    re.search(r'\b403\s+forbidden\b', msg)
+                )
+                if _has_403_status or _has_forbidden_status:
                     host = _urlparse.urlsplit(url).hostname or "?"
                     raise HttpError(
                         f"Egress proxy refused {host!r}: host not on the "
@@ -861,9 +944,24 @@ class UrllibClient:
                 # Drain enough body for the error message — bounded.
                 snippet = resp.read(512, decode_content=True) or b""
                 reason = resp.reason or "?"
+                # Pre-fix the snippet was interpolated into the
+                # exception message via `repr()` only — no secret
+                # redaction. 4xx responses commonly echo the
+                # request token / API key back in the error body
+                # ("Invalid API key abc-XXX...", "Permission denied
+                # for token xxx"), which then landed verbatim in
+                # caller logs / scorecards / crash dumps. Defang
+                # via redact_secrets so any token-shaped substring
+                # in the body gets masked before it reaches the log
+                # surface. `errors='replace'` for the decode so
+                # a non-UTF-8 body (rare but possible for binary
+                # error responses) doesn't itself crash here.
+                from core.security.redaction import redact_secrets
+                snippet_text = snippet.decode("utf-8", errors="replace")
+                snippet_safe = redact_secrets(snippet_text, reveal_secrets=False)
                 raise HttpError(
                     f"HTTP {resp.status} from {_safe_url_for_log(url)}: "
-                    f"{reason} {snippet!r}"[:200],
+                    f"{reason} {snippet_safe!r}"[:200],
                     status=resp.status,
                 )
 
@@ -986,27 +1084,109 @@ class UrllibClient:
                         f"refused redirect from {_safe_url_for_log(url)} "
                         f"to {_safe_url_for_log(final_url)}: {exc}"
                     ) from exc
+            # Pre-fix `{k.lower(): v for k, v in resp.headers.items()}`
+            # silently dropped duplicate-name headers (last value
+            # wins). The operationally-significant case is
+            # `Set-Cookie`: an HTTP response can legitimately carry
+            # multiple Set-Cookie headers (one per cookie), and the
+            # dict comprehension collapsed them to a single value
+            # per key — caller saw only the LAST cookie set, the
+            # others lost. Other headers (Vary, Link, X-Foo) can
+            # also legitimately repeat per RFC 9110 §5.3.
+            #
+            # Aggregate via getlist() so multi-value headers become
+            # newline-joined values. Caller can split on `\n` for
+            # the multi-value cases (Set-Cookie commonly does this);
+            # single-value headers still come back as the bare
+            # string. urllib3's HTTPHeaderDict.getlist returns the
+            # full list preserving order and casing-insensitive.
+            collapsed_headers: Dict[str, str] = {}
+            for key in resp.headers:
+                values = resp.headers.getlist(key) if hasattr(resp.headers, "getlist") else [resp.headers[key]]
+                # Already lower-cased after collection — last lowercase wins
+                # if the server somehow sent the same header in multiple cases
+                # (very rare; if so the values are joined together too).
+                lk = key.lower()
+                if lk in collapsed_headers and values:
+                    collapsed_headers[lk] = collapsed_headers[lk] + "\n" + "\n".join(values)
+                else:
+                    collapsed_headers[lk] = "\n".join(values) if values else ""
             return Response(
                 status=resp.status,
-                headers={k.lower(): v for k, v in resp.headers.items()},
+                headers=collapsed_headers,
                 body=raw,
                 url=final_url,
             )
         finally:
-            # Return the connection to the pool. Without this, repeated
-            # requests would each open a fresh connection — exactly the
-            # cost we're switching to urllib3 to avoid.
+            # Drain THEN release. Pre-fix the finally only called
+            # `resp.release_conn()`. release_conn returns the
+            # connection to the pool WITHOUT draining any
+            # remaining body bytes from the socket buffer. The
+            # next request that picks up the connection then saw
+            # the leftover bytes prepended to its OWN response —
+            # parser confusion, wrong status codes, occasional
+            # data leaks across requests sharing the pool.
+            #
+            # Two failure paths that left bytes in the buffer:
+            #   * 4xx snippet branch reads only 512 bytes but a
+            #     larger error body has more in flight.
+            #   * SizeLimitExceeded raises mid-stream with the
+            #     remainder of the body still on the socket.
+            #
+            # `drain_conn()` reads remaining bytes (up to a small
+            # cap inside urllib3, ~64KB by default) so the socket
+            # buffer is empty when release_conn returns the conn
+            # to the pool. If drain itself fails we fall through
+            # to release — better to leak a single connection
+            # than to crash the cleanup path.
+            try:
+                if hasattr(resp, "drain_conn"):
+                    resp.drain_conn()
+            except Exception:
+                pass
             resp.release_conn()
 
     @staticmethod
     def _parse_retry_after(value: Optional[str]) -> Optional[int]:
-        """Parse Retry-After header (seconds form only; HTTP-date form ignored)."""
+        """Parse Retry-After header. Both delta-seconds and HTTP-date forms.
+
+        RFC 7231 §7.1.3 defines two grammars: a non-negative integer
+        (``Retry-After: 120``) or an HTTP-date
+        (``Retry-After: Fri, 31 Dec 1999 23:59:59 GMT``). Pre-fix the
+        seconds-only path silently returned None on the date form,
+        which caused the caller's retry loop to fall back to its
+        default backoff schedule — typically much shorter than what
+        the upstream actually wanted. For a 503 from Cloudflare /
+        Akamai (commonly date-form), this triggered the retry storm
+        the header is supposed to prevent.
+
+        Both forms get clamped to [1, 1800] so a malicious /
+        misconfigured upstream can't tie up our connection slot for
+        an arbitrary delay. Negative deltas (legacy behaviour bug)
+        and past dates both clamp to 1.
+        """
         if not value:
             return None
+        s = value.strip()
         try:
-            n = int(value.strip())
-            return max(1, min(n, 1800))  # clamp 1s..30min
+            n = int(s)
+            return max(1, min(n, 1800))
         except ValueError:
+            pass
+        # HTTP-date form — RFC 7231 says the value is in the IMF-fixdate
+        # / obs-date subset of RFC 5322. Use email.utils.parsedate_to_datetime
+        # which handles all three IMF/RFC 850/asctime variants.
+        try:
+            from email.utils import parsedate_to_datetime
+            from datetime import datetime, timezone
+            target = parsedate_to_datetime(s)
+            if target is None:
+                return None
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            delta = (target - datetime.now(timezone.utc)).total_seconds()
+            return max(1, min(int(delta), 1800))
+        except (TypeError, ValueError):
             return None
 
 

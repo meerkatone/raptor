@@ -73,10 +73,16 @@ def _extract_date_from_dir(run_dir: Path) -> str:
     so collision-renamed files stay stable across re-merges) and
     short enough to not bloat downstream filenames.
     """
-    match = re.search(r'(\d{8}[-_]\d{6})', run_dir.name)
+    # `re.ASCII` so `\d` matches only ASCII digits. Same rationale as
+    # core/run/metadata.py:_extract_date_from_dir — Unicode-default
+    # `\d` admits Devanagari / Arabic-Indic / fullwidth digits, which
+    # would break the deterministic timestamp-from-name extraction
+    # if a tool re-encoded glyphs in the path. Anchoring to ASCII
+    # keeps the merge-time collision suffix stable across passes.
+    match = re.search(r'(\d{8}[-_]\d{6})', run_dir.name, re.ASCII)
     if match:
         return match.group(1)
-    match = re.search(r'(\d{8})', run_dir.name)
+    match = re.search(r'(\d{8})', run_dir.name, re.ASCII)
     if match:
         return match.group(1)
     return _content_suffix(run_dir.name)

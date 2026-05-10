@@ -166,23 +166,46 @@ def _rank_candidates(
     if not candidates:
         return None
 
+    # Guarded stat helper: candidate run dirs can disappear between
+    # the enumeration that built `candidates` and this ranking pass
+    # (operator runs `/project clean`, a parallel pruner unlinks an
+    # old run, the dir was on a flaky NFS mount). Pre-fix `d.stat()`
+    # raised FileNotFoundError mid-sort and the whole bridge stage
+    # crashed, taking down /validate's understand-import with it.
+    # Treat unstattable candidates as if they had mtime=0 so they
+    # sort to the bottom, log so the operator sees the disappearance.
+    def _safe_mtime_ns(d: Path) -> int:
+        try:
+            return d.stat().st_mtime_ns
+        except OSError as exc:
+            logger.warning(
+                "understand_bridge: candidate %s vanished during ranking (%s)"
+                " — sorting last", d.name, exc,
+            )
+            return 0
+
     if not target_path:
         # No target — can't hash on disk, just pick newest.
         # Use mtime_ns for sub-second resolution; directory name breaks ties.
-        candidates.sort(key=lambda d: (d.stat().st_mtime_ns, d.name), reverse=True)
+        candidates.sort(key=lambda d: (_safe_mtime_ns(d), d.name), reverse=True)
         return candidates[0], set()
 
+    # Shared cache: hash each disk path at most once across all
+    # candidate runs. The disk doesn't change between candidates in
+    # a single ranking call, so re-hashing the same content M times
+    # was pure waste. See `_find_stale_files` docstring.
+    disk_hash_cache: Dict[str, Optional[str]] = {}
     scored = []
     for d in candidates:
         u_checklist = load_json(d / "checklist.json")
         if not u_checklist:
             # No checklist — treat as fully stale (can't verify any file)
-            scored.append((1, d.stat().st_mtime_ns, d, set()))
+            scored.append((1, _safe_mtime_ns(d), d, set()))
             continue
         u_hashes = _extract_hashes(u_checklist)
-        stale = _find_stale_files(u_hashes, target_path)
+        stale = _find_stale_files(u_hashes, target_path, disk_hash_cache)
         # fresh = 0 stale files → sort key 0 (best)
-        scored.append((len(stale), d.stat().st_mtime_ns, d, stale))
+        scored.append((len(stale), _safe_mtime_ns(d), d, stale))
 
     # Sort descending: fewest stale (negated), then newest mtime_ns, then
     # directory name (timestamp-based names sort chronologically).
@@ -201,23 +224,50 @@ def _rank_candidates(
 
 
 def _extract_hashes(checklist: Dict[str, Any]) -> Dict[str, str]:
-    """Build {relative_path: sha256} from a checklist."""
-    return {
-        f["path"]: f["sha256"]
-        for f in checklist.get("files", [])
-        if f.get("sha256")
-    }
+    """Build {relative_path: sha256} from a checklist.
+
+    Pre-fix the comprehension subscripted ``f["path"]`` directly,
+    which raised KeyError if a checklist entry had ``sha256`` but
+    no ``path`` key (older /understand outputs that recorded
+    hash-only entries for synthesised pseudo-files, hand-edited
+    checklists, partial writes from a killed Stage 0). One missing
+    key took down the whole bridge stage. Use ``.get`` and skip
+    entries without both fields, plus an isinstance guard so a
+    non-dict entry (corrupt list element) doesn't AttributeError on
+    `.get`.
+    """
+    out: Dict[str, str] = {}
+    for f in checklist.get("files", []):
+        if not isinstance(f, dict):
+            continue
+        path = f.get("path")
+        sha = f.get("sha256")
+        if isinstance(path, str) and isinstance(sha, str) and path and sha:
+            out[path] = sha
+    return out
 
 
 def _find_stale_files(
     understand_hashes: Dict[str, str],
     target_path: str,
+    disk_hash_cache: Optional[Dict[str, Optional[str]]] = None,
 ) -> Set[str]:
     """Return relative paths whose on-disk SHA-256 differs from the understand checklist.
 
     Hashes the actual files under target_path rather than comparing against
     another checklist. This is immune to the project-mode symlink problem
     where both runs share one checklist.json file.
+
+    `disk_hash_cache` (optional) is a caller-supplied dict that
+    memoises ``rel_path -> on-disk sha256 (or None if missing)``.
+    Pre-fix the function hashed each path independently for every
+    invocation. Callers like ``_rank_candidates`` invoke this once
+    per candidate run dir — for M candidates and N target files
+    that's M*N hashes of identical on-disk content (the disk
+    doesn't change between candidates in a single _rank_candidates
+    call). With four candidates against a 50k-file target the
+    redundant SHA-256 work multiplied wallclock by ~4x. Passing a
+    shared dict collapses repeats to one hash per disk path.
     """
     from core.hash import sha256_file
 
@@ -225,11 +275,18 @@ def _find_stale_files(
     stale: Set[str] = set()
     for rel_path, u_hash in understand_hashes.items():
         full_path = target / rel_path
-        if not full_path.is_file():
-            # File deleted since understand ran
+        if disk_hash_cache is not None and rel_path in disk_hash_cache:
+            disk_hash = disk_hash_cache[rel_path]
+        else:
+            if not full_path.is_file():
+                disk_hash = None
+            else:
+                disk_hash = sha256_file(full_path)
+            if disk_hash_cache is not None:
+                disk_hash_cache[rel_path] = disk_hash
+        if disk_hash is None:
             stale.add(rel_path)
             continue
-        disk_hash = sha256_file(full_path)
         if disk_hash != u_hash:
             stale.add(rel_path)
     return stale
@@ -262,7 +319,20 @@ def _search_understand_dirs(
     )
 
     results = []
-    for d in parent_dir.iterdir():
+    try:
+        children = list(parent_dir.iterdir())
+    except OSError as exc:
+        # parent_dir itself unreadable (PermissionError, ENOTDIR
+        # mid-call from a racing remount). Pre-fix the loop just
+        # crashed; now log so the operator sees why discovery
+        # returned nothing instead of guessing "no understand runs".
+        logger.warning(
+            "understand_bridge: cannot list %s (%s) — discovery skipped",
+            parent_dir, exc,
+        )
+        return []
+
+    for d in children:
         try:
             if not (d.is_dir()
                     and d != exclude
@@ -270,8 +340,22 @@ def _search_understand_dirs(
                     and infer_command_type(d) == "understand"
                     and (d / "context-map.json").exists()):
                 continue
+        except PermissionError as exc:
+            # Pre-fix `except OSError: continue` swallowed
+            # PermissionError silently. A user with a misconfigured
+            # ACL on a single understand run dir would see the
+            # whole bridge skip that run with no diagnostic — they
+            # then re-ran /validate repeatedly and got the same
+            # silent failure. Log permission errors specifically
+            # (they're config-fixable) while staying silent on
+            # broken-symlink class OSErrors.
+            logger.debug(
+                "understand_bridge: permission denied probing %s (%s) — skipped",
+                d.name, exc,
+            )
+            continue
         except OSError:
-            continue  # broken symlinks, permission errors
+            continue  # broken symlinks, transient races
 
         if target_resolved:
             from core.json import load_json
@@ -284,7 +368,16 @@ def _search_understand_dirs(
 
         results.append(d)
 
-    results.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    # Same vanished-mid-rank race as _rank_candidates — guard stat()
+    # so a deleted dir doesn't kill the whole sort. Sort key 0 puts
+    # vanished dirs at the bottom; they'll still be in `results` but
+    # the caller's _rank_candidates layer guards subsequent stats.
+    def _safe_mtime(d: Path) -> float:
+        try:
+            return d.stat().st_mtime
+        except OSError:
+            return 0.0
+    results.sort(key=_safe_mtime, reverse=True)
     return results
 
 
@@ -1000,10 +1093,36 @@ def _filter_context_map(context_map: Dict[str, Any], stale_files: Set[str]) -> i
 
     flows = context_map.get("unchecked_flows", [])
     if isinstance(flows, list):
+        # Pre-fix the filter assumed `entry_point` / `sink` were
+        # always single strings — `f.get("entry_point") in kept_ep_ids`
+        # silently produced False when /understand emitted a flow
+        # with a list of IDs (multi-source fan-in or multi-sink
+        # fan-out, both legitimate per the context-map schema).
+        # That drop reported the flow as "stale-filtered" when in
+        # fact every referenced ID survived; downstream consumers
+        # then lost a flow that should have been kept.
+        #
+        # Also `f.get(...)` raised AttributeError if a non-dict
+        # element snuck into `flows`. Guard for that too.
+        def _flow_ids(f, key, kept):
+            v = f.get(key)
+            if v is None:
+                return False  # missing field — stale-by-default
+            if isinstance(v, list):
+                # Empty list = no IDs to validate; treat as
+                # missing (stale-drop). Non-empty: every ID must
+                # survive.
+                if not v:
+                    return False
+                return all(item in kept for item in v)
+            # Scalar (typical case): str / int / etc.
+            return v in kept
+
         clean = [
             f for f in flows
-            if f.get("entry_point") in kept_ep_ids
-            and f.get("sink") in kept_sink_ids
+            if isinstance(f, dict)
+            and _flow_ids(f, "entry_point", kept_ep_ids)
+            and _flow_ids(f, "sink", kept_sink_ids)
         ]
         removed += len(flows) - len(clean)
         context_map["unchecked_flows"] = clean
@@ -1132,10 +1251,48 @@ def _import_flow_traces(
 
     paths_path = validate_dir / "attack-paths.json"
     existing_paths: List[Dict[str, Any]] = []
+    paths_was_malformed = False
     if paths_path.exists():
         loaded = load_json(paths_path)
         if isinstance(loaded, list):
             existing_paths = loaded
+        else:
+            # Malformed paths_path: pre-fix two failure modes both
+            # silently destroyed operator data:
+            #
+            #   * imported>0 → save_json() overwrote the malformed
+            #     file with the freshly-imported paths, deleting
+            #     whatever the operator had there (corrupt-but-
+            #     recoverable JSON, hand-edited notes, an in-progress
+            #     export).
+            #   * imported==0 → the malformed file STAYED on disk
+            #     and downstream consumers (Stage E, /diagram) tried
+            #     to read it and failed in their own surprising ways
+            #     because the bridge gave no signal that paths_path
+            #     was unreadable.
+            #
+            # Move the malformed file aside to a `.malformed-<ts>`
+            # sibling so the operator can inspect / recover it,
+            # and warn loudly. Then proceed as if paths_path didn't
+            # exist (existing_paths stays []).
+            paths_was_malformed = True
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            quarantine = paths_path.with_suffix(
+                paths_path.suffix + f".malformed-{ts}"
+            )
+            try:
+                paths_path.rename(quarantine)
+                logger.warning(
+                    "understand_bridge: %s was not a JSON list "
+                    "(loaded=%s); moved aside to %s",
+                    paths_path.name, type(loaded).__name__, quarantine.name,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "understand_bridge: %s was not a JSON list and could "
+                    "not be quarantined (%s) — proceeding with empty list",
+                    paths_path.name, exc,
+                )
 
     # Track which IDs are already present to avoid duplicates
     existing_ids = {p.get("id") for p in existing_paths if p.get("id")}

@@ -20,7 +20,12 @@ def bv_to_int(raw: int, width: int, signed: bool) -> int:
     pass values that drifted out of range — most often:
 
     * `width <= 0` (a degenerate decl, e.g. from a `Const` rather than
-      a `BitVec`); fall through with `raw` unchanged.
+      a `BitVec`). Pre-fix this fell through with `raw` unchanged —
+      silent passthrough that masked the underlying bug (caller
+      passed the wrong decl). The signed/unsigned reinterpretation
+      is meaningless without a width, so a width<=0 caller is a
+      programming error that should surface as ValueError just like
+      the out-of-range cases below.
     * `raw` already < 0 (a previously-converted signed value being
       passed through this function twice — happens when the caller
       runs `bv_to_int(format_witness(...))` against a model of a
@@ -31,7 +36,9 @@ def bv_to_int(raw: int, width: int, signed: bool) -> int:
       a hand-constructed test). Same: silent truncation hides the bug.
     """
     if width <= 0:
-        return raw
+        raise ValueError(
+            f"bv_to_int: width={width} must be positive (degenerate decl?)"
+        )
     upper = 1 << width
     if not 0 <= raw < upper:
         raise ValueError(
@@ -79,12 +86,29 @@ def format_witness(
     `Mapping[str, bool]` per-decl signedness map (preferred for
     mixed-type constraint sets). See `_resolve_signedness`.
     """
+    # Collision detection on `name = str(decl)`. Z3 decls with the
+    # same name in different scopes (e.g. a constraint set that
+    # combined two parsed expressions, each with its own `x`) all
+    # stringify to `"x"` — pre-fix the second decl's value silently
+    # OVERWROTE the first in `out[name] = ...`. The model then
+    # appeared to have one variable when it really had two, and
+    # consumers comparing constraints against the witness saw the
+    # wrong value for one of them. Surface the collision via a
+    # disambiguating suffix (`x`, `x__1`, `x__2`, ...) so all values
+    # survive and the operator can see the multiplicity in the
+    # output.
     out: Dict[str, int] = {}
     for decl in model.decls():
         val = model[decl]
         if not z3.is_bv_value(val):
             continue
         name = str(decl)
+        # Disambiguate same-named decls.
+        if name in out:
+            suffix = 1
+            while f"{name}__{suffix}" in out:
+                suffix += 1
+            name = f"{name}__{suffix}"
         out[name] = bv_to_int(
             val.as_long(), val.size(), _resolve_signedness(name, signed),
         )

@@ -124,7 +124,22 @@ def _client() -> UrllibClient:
 
 
 def _is_cve_id(cve_id: str) -> bool:
-    return bool(re.match(r"^CVE-\d{4}-\d{4,7}$", cve_id or ""))
+    # `re.fullmatch` (not `re.match` + `^...$`) and `re.ASCII` so:
+    #   * `$` doesn't match before a trailing newline. Pre-fix
+    #     `re.match("^CVE-...$", "CVE-2023-1234\n")` accepted the
+    #     trailing newline, and the cve_id then flowed into the
+    #     URL templates (`_DEBIAN_URL.format(cve_id=cve_id)`) and
+    #     the cache key (`f"{distro}/{cve_id}"`). The newline in
+    #     a URL splits the HTTP request into two — CRLF / header
+    #     injection — and corrupts the cache filename.
+    #   * `\d` matches only ASCII digits. Without `re.ASCII`,
+    #     `\d` admits Arabic-Indic / Devanagari / fullwidth digit
+    #     chars; the CVE-id then propagates as a unicode-mixed
+    #     string into URL formatting where some HTTP clients
+    #     idna-encode it weirdly, producing wrong cache keys.
+    return bool(
+        re.fullmatch(r"CVE-\d{4}-\d{4,7}", cve_id or "", re.ASCII)
+    )
 
 
 def _get_response(url: str) -> Response | dict[str, Any]:

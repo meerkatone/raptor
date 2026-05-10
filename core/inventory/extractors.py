@@ -486,7 +486,13 @@ class GoExtractor:
     syntax can't be parsed reliably with regex), return types.
     """
 
-    PATTERN = r'^func\s+(?:\((\w+)\s+(\*?\w+)\)\s+)?(\w+)\s*\('
+    # `(?a)` (re.ASCII) so `\w` matches only ASCII identifiers. Go's
+    # language spec restricts identifiers to ASCII; without `re.ASCII`,
+    # Python's `\w` admits Unicode word characters and would capture
+    # a Cyrillic homoglyph as a "function name", surfacing into the
+    # inventory under a name that visually matches a real ASCII
+    # identifier — confusing greps and downstream cross-references.
+    PATTERN = r'(?a)^func\s+(?:\((\w+)\s+(\*?\w+)\)\s+)?(\w+)\s*\('
 
     def extract(self, filepath: str, content: str) -> List[FunctionInfo]:
         functions = []
@@ -1043,6 +1049,13 @@ def _global_names(node, language: str):
     legacy `_global_name` single-result is fine. Go's `var ( ... )`
     and `const ( ... )` blocks declare multiple specs in a single
     syntactic node; this helper yields every spec's name.
+
+    Python's chained assignment (`A = B = 1`) is a single
+    `assignment` node with multiple identifier children on the LHS
+    before the value. Pre-fix `_global_name` returned only the first
+    identifier ("A"), so chained constants were silently
+    half-recorded — `B` never made the inventory and downstream
+    coverage / lookup tools couldn't find it.
     """
     if language == "go":
         for child in node.children:
@@ -1051,6 +1064,34 @@ def _global_names(node, language: str):
                     if sub.type == "identifier":
                         yield sub.text.decode()
         return
+
+    if language == "python":
+        # Unwrap expression_statement → assignment if needed.
+        target = node
+        if target.type == "expression_statement":
+            target = next(
+                (c for c in target.children if c.type == "assignment"),
+                None,
+            )
+        if target is not None and target.type == "assignment":
+            # Tree-sitter Python represents `a = b = 1` as:
+            #   assignment(identifier "a", "=", identifier "b", "=", integer "1")
+            # Yield every identifier child that appears BEFORE the
+            # last "=" — i.e. every LHS target. Same naming filter
+            # as `_global_name` (uppercase / TitleCase only) so we
+            # don't pollute the inventory with locals.
+            eq_indices = [
+                i for i, c in enumerate(target.children) if c.type == "="
+            ]
+            if eq_indices:
+                cutoff = eq_indices[-1]
+                for c in target.children[:cutoff]:
+                    if c.type == "identifier":
+                        nm = c.text.decode()
+                        if nm and (nm.isupper() or (nm[0].isupper() and not nm.islower())):
+                            yield nm
+                return
+
     # Other languages: defer to the single-name function.
     name = _global_name(node, language)
     if name:

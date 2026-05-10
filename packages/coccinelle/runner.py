@@ -352,10 +352,21 @@ def _inject_harness(rule_text: str, rule_name: str) -> str:
     If no position metavariable is found, returns the rule unchanged
     (matches won't produce structured output, but spatch still runs).
     """
-    if not re.search(r"position\s+\w+", rule_text):
+    # `re.ASCII` so `\w` matches only ASCII identifiers. Pre-fix the
+    # bare pattern admitted Unicode word chars (Cyrillic, Greek,
+    # CJK, fullwidth letters) — and the captured pos_var is then
+    # f-string-interpolated into the synthesised @script:python
+    # harness AND used as a Python identifier in the harness's for-
+    # loop. Python 3 accepts Unicode identifiers, but a hostile
+    # rule file with a homoglyph pos_var could produce a harness
+    # whose runtime identifier collides with a different rule
+    # variable visually but not structurally. Stick to ASCII for
+    # the harness-injected identifier; legitimate Coccinelle rules
+    # use ASCII metavariable names per convention.
+    if not re.search(r"position\s+\w+", rule_text, re.ASCII):
         return rule_text
 
-    pos_match = re.search(r"position\s+(\w+)", rule_text)
+    pos_match = re.search(r"position\s+(\w+)", rule_text, re.ASCII)
     pos_var = pos_match.group(1)
 
     # Detect multi-rule .cocci files. Pre-fix the harness only
@@ -372,7 +383,9 @@ def _inject_harness(rule_text: str, rule_name: str) -> str:
     # JSON harness), and the caller logs that structured
     # output was unavailable for this rule file. Better than
     # silently emitting partial / wrong data.
-    rule_names = re.findall(r"@(\w+)@", rule_text)
+    # `re.ASCII` for the same identifier-scope reason as above —
+    # rule names are Python identifiers in the harness.
+    rule_names = re.findall(r"@(\w+)@", rule_text, re.ASCII)
     if len(set(rule_names)) > 1:
         # Multi-rule file — harness injection isn't safe.
         # Caller handles the no-output case via spatch's

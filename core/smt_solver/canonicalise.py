@@ -74,8 +74,21 @@ _REWRITES: Tuple[Tuple[re.Pattern[str], str], ...] = (
     # ``UNRECOGNIZED_FORM`` rejection from the path validator (one_gadget
     # has its own native ``is NULL`` suffix grammar, but the rewrite is
     # semantically identical for it: both reach ``lhs == 0``).
-    (re.compile(r'\bis\s+null\b',                             re.IGNORECASE), ' == NULL '),
-    (re.compile(r'\bis\s+zero\b',                             re.IGNORECASE), ' == 0 '),
+    # Lookbehind requires a non-whitespace LHS before `is null` /
+    # `is zero`. Pre-fix `is null` at the start of a line (or
+    # surrounded by whitespace only — empty constraint cell, fragment
+    # extracted from a longer prose) rewrote to ` == NULL `, an
+    # operator-less expression that the downstream parser then
+    # rejected with `UNRECOGNIZED_FORM` — but the operator's actual
+    # input was visibly malformed and they got a misleading
+    # "rewrite-then-parse failed" diagnostic instead of the more
+    # helpful "missing left-hand side". With the lookbehind the
+    # rewrite simply doesn't fire on lhs-less input; the original
+    # `is null` reaches the parser unchanged and the unrecognised-
+    # form rejection is keyed to the original token (operator can
+    # find it in their source).
+    (re.compile(r'(?<=\S)\s+is\s+null\b',                     re.IGNORECASE), ' == NULL '),
+    (re.compile(r'(?<=\S)\s+is\s+zero\b',                     re.IGNORECASE), ' == 0 '),
     # Single-word synonyms. Tightened to require WHITESPACE
     # (or string boundary) on both sides — `\b` alone matches
     # at any word/non-word transition, including code-form
@@ -122,7 +135,22 @@ def canonicalise(text: str) -> str:
     the multi-condition structure intact. Internal multi-space
     runs from rewrite expansion still collapse fine.
     """
-    out = text
+    # Cap input length before the per-pattern loop. Pre-fix the
+    # `for pat, repl in _REWRITES: out = pat.sub(repl, out)` loop
+    # ran ~20 patterns sequentially over the WHOLE input string —
+    # O(20*N) work for an N-byte input. Real condition strings
+    # passed to canonicalise() are short (a single boolean
+    # expression, low-KB at most), but a hostile / corrupt
+    # caller passing a multi-MB blob would burn proportional
+    # wallclock per call. 256 KB cap is two orders of magnitude
+    # beyond any realistic condition; oversized input is
+    # almost certainly an upstream bug rather than legitimate
+    # data, so truncating is the safer mode than chewing through
+    # it. Truncate from the END (keep the head) — the leading
+    # part of a condition is the part the rewrites actually
+    # care about.
+    _CANONICALISE_INPUT_CAP = 256 * 1024
+    out = text if len(text) <= _CANONICALISE_INPUT_CAP else text[:_CANONICALISE_INPUT_CAP]
     for pat, repl in _REWRITES:
         out = pat.sub(repl, out)
     return _WHITESPACE_RUN.sub(' ', out).strip()
