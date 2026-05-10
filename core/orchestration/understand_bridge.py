@@ -1174,10 +1174,48 @@ def _import_flow_traces(
 
     paths_path = validate_dir / "attack-paths.json"
     existing_paths: List[Dict[str, Any]] = []
+    paths_was_malformed = False
     if paths_path.exists():
         loaded = load_json(paths_path)
         if isinstance(loaded, list):
             existing_paths = loaded
+        else:
+            # Malformed paths_path: pre-fix two failure modes both
+            # silently destroyed operator data:
+            #
+            #   * imported>0 → save_json() overwrote the malformed
+            #     file with the freshly-imported paths, deleting
+            #     whatever the operator had there (corrupt-but-
+            #     recoverable JSON, hand-edited notes, an in-progress
+            #     export).
+            #   * imported==0 → the malformed file STAYED on disk
+            #     and downstream consumers (Stage E, /diagram) tried
+            #     to read it and failed in their own surprising ways
+            #     because the bridge gave no signal that paths_path
+            #     was unreadable.
+            #
+            # Move the malformed file aside to a `.malformed-<ts>`
+            # sibling so the operator can inspect / recover it,
+            # and warn loudly. Then proceed as if paths_path didn't
+            # exist (existing_paths stays []).
+            paths_was_malformed = True
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            quarantine = paths_path.with_suffix(
+                paths_path.suffix + f".malformed-{ts}"
+            )
+            try:
+                paths_path.rename(quarantine)
+                logger.warning(
+                    "understand_bridge: %s was not a JSON list "
+                    "(loaded=%s); moved aside to %s",
+                    paths_path.name, type(loaded).__name__, quarantine.name,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "understand_bridge: %s was not a JSON list and could "
+                    "not be quarantined (%s) — proceeding with empty list",
+                    paths_path.name, exc,
+                )
 
     # Track which IDs are already present to avoid duplicates
     existing_ids = {p.get("id") for p in existing_paths if p.get("id")}
