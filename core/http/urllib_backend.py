@@ -1072,9 +1072,36 @@ class UrllibClient:
                         f"refused redirect from {_safe_url_for_log(url)} "
                         f"to {_safe_url_for_log(final_url)}: {exc}"
                     ) from exc
+            # Pre-fix `{k.lower(): v for k, v in resp.headers.items()}`
+            # silently dropped duplicate-name headers (last value
+            # wins). The operationally-significant case is
+            # `Set-Cookie`: an HTTP response can legitimately carry
+            # multiple Set-Cookie headers (one per cookie), and the
+            # dict comprehension collapsed them to a single value
+            # per key — caller saw only the LAST cookie set, the
+            # others lost. Other headers (Vary, Link, X-Foo) can
+            # also legitimately repeat per RFC 9110 §5.3.
+            #
+            # Aggregate via getlist() so multi-value headers become
+            # newline-joined values. Caller can split on `\n` for
+            # the multi-value cases (Set-Cookie commonly does this);
+            # single-value headers still come back as the bare
+            # string. urllib3's HTTPHeaderDict.getlist returns the
+            # full list preserving order and casing-insensitive.
+            collapsed_headers: Dict[str, str] = {}
+            for key in resp.headers:
+                values = resp.headers.getlist(key) if hasattr(resp.headers, "getlist") else [resp.headers[key]]
+                # Already lower-cased after collection — last lowercase wins
+                # if the server somehow sent the same header in multiple cases
+                # (very rare; if so the values are joined together too).
+                lk = key.lower()
+                if lk in collapsed_headers and values:
+                    collapsed_headers[lk] = collapsed_headers[lk] + "\n" + "\n".join(values)
+                else:
+                    collapsed_headers[lk] = "\n".join(values) if values else ""
             return Response(
                 status=resp.status,
-                headers={k.lower(): v for k, v in resp.headers.items()},
+                headers=collapsed_headers,
                 body=raw,
                 url=final_url,
             )
