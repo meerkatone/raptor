@@ -166,10 +166,28 @@ def _rank_candidates(
     if not candidates:
         return None
 
+    # Guarded stat helper: candidate run dirs can disappear between
+    # the enumeration that built `candidates` and this ranking pass
+    # (operator runs `/project clean`, a parallel pruner unlinks an
+    # old run, the dir was on a flaky NFS mount). Pre-fix `d.stat()`
+    # raised FileNotFoundError mid-sort and the whole bridge stage
+    # crashed, taking down /validate's understand-import with it.
+    # Treat unstattable candidates as if they had mtime=0 so they
+    # sort to the bottom, log so the operator sees the disappearance.
+    def _safe_mtime_ns(d: Path) -> int:
+        try:
+            return d.stat().st_mtime_ns
+        except OSError as exc:
+            logger.warning(
+                "understand_bridge: candidate %s vanished during ranking (%s)"
+                " — sorting last", d.name, exc,
+            )
+            return 0
+
     if not target_path:
         # No target — can't hash on disk, just pick newest.
         # Use mtime_ns for sub-second resolution; directory name breaks ties.
-        candidates.sort(key=lambda d: (d.stat().st_mtime_ns, d.name), reverse=True)
+        candidates.sort(key=lambda d: (_safe_mtime_ns(d), d.name), reverse=True)
         return candidates[0], set()
 
     # Shared cache: hash each disk path at most once across all
@@ -182,12 +200,12 @@ def _rank_candidates(
         u_checklist = load_json(d / "checklist.json")
         if not u_checklist:
             # No checklist — treat as fully stale (can't verify any file)
-            scored.append((1, d.stat().st_mtime_ns, d, set()))
+            scored.append((1, _safe_mtime_ns(d), d, set()))
             continue
         u_hashes = _extract_hashes(u_checklist)
         stale = _find_stale_files(u_hashes, target_path, disk_hash_cache)
         # fresh = 0 stale files → sort key 0 (best)
-        scored.append((len(stale), d.stat().st_mtime_ns, d, stale))
+        scored.append((len(stale), _safe_mtime_ns(d), d, stale))
 
     # Sort descending: fewest stale (negated), then newest mtime_ns, then
     # directory name (timestamp-based names sort chronologically).
