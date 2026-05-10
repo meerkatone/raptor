@@ -932,9 +932,24 @@ class UrllibClient:
                 # Drain enough body for the error message — bounded.
                 snippet = resp.read(512, decode_content=True) or b""
                 reason = resp.reason or "?"
+                # Pre-fix the snippet was interpolated into the
+                # exception message via `repr()` only — no secret
+                # redaction. 4xx responses commonly echo the
+                # request token / API key back in the error body
+                # ("Invalid API key abc-XXX...", "Permission denied
+                # for token xxx"), which then landed verbatim in
+                # caller logs / scorecards / crash dumps. Defang
+                # via redact_secrets so any token-shaped substring
+                # in the body gets masked before it reaches the log
+                # surface. `errors='replace'` for the decode so
+                # a non-UTF-8 body (rare but possible for binary
+                # error responses) doesn't itself crash here.
+                from core.security.redaction import redact_secrets
+                snippet_text = snippet.decode("utf-8", errors="replace")
+                snippet_safe = redact_secrets(snippet_text, reveal_secrets=False)
                 raise HttpError(
                     f"HTTP {resp.status} from {_safe_url_for_log(url)}: "
-                    f"{reason} {snippet!r}"[:200],
+                    f"{reason} {snippet_safe!r}"[:200],
                     status=resp.status,
                 )
 
