@@ -151,9 +151,21 @@ def _check_target_mismatch(target_path: str, project_name: str,
     except ValueError:
         pass
 
+    # Operator-facing error: show the paths the operator actually
+    # typed, not the resolved forms. Pre-fix the message printed
+    # `resolved` and `project_resolved` directly. On macOS `/var`,
+    # `/tmp` and several other top-levels are symlinks to
+    # `/private/var`, `/private/tmp` etc. — `resolve()` rewrites
+    # them. The operator who passed `--target /var/log/foo` then
+    # saw an error claiming `/private/var/log/foo is outside
+    # project (/private/var/log/proj)` and didn't recognise either
+    # path. The remediation hint also suggested re-running with
+    # the rewritten path, which works but reads as cargo-cult.
+    # Echo the operator's strings instead; the resolved forms only
+    # exist for the comparison.
     raise TargetMismatchError(
-        f"target {resolved} is outside project {project_name} ({project_resolved})\n"
+        f"target {target_path} is outside project {project_name} ({project_target})\n"
         f"  A project tracks one target. To analyze a different codebase:\n"
-        f"    /project create <name> --target {resolved}\n"
+        f"    /project create <name> --target {target_path}\n"
         f"    /project use none"
     )
