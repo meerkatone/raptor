@@ -74,8 +74,21 @@ _REWRITES: Tuple[Tuple[re.Pattern[str], str], ...] = (
     # ``UNRECOGNIZED_FORM`` rejection from the path validator (one_gadget
     # has its own native ``is NULL`` suffix grammar, but the rewrite is
     # semantically identical for it: both reach ``lhs == 0``).
-    (re.compile(r'\bis\s+null\b',                             re.IGNORECASE), ' == NULL '),
-    (re.compile(r'\bis\s+zero\b',                             re.IGNORECASE), ' == 0 '),
+    # Lookbehind requires a non-whitespace LHS before `is null` /
+    # `is zero`. Pre-fix `is null` at the start of a line (or
+    # surrounded by whitespace only — empty constraint cell, fragment
+    # extracted from a longer prose) rewrote to ` == NULL `, an
+    # operator-less expression that the downstream parser then
+    # rejected with `UNRECOGNIZED_FORM` — but the operator's actual
+    # input was visibly malformed and they got a misleading
+    # "rewrite-then-parse failed" diagnostic instead of the more
+    # helpful "missing left-hand side". With the lookbehind the
+    # rewrite simply doesn't fire on lhs-less input; the original
+    # `is null` reaches the parser unchanged and the unrecognised-
+    # form rejection is keyed to the original token (operator can
+    # find it in their source).
+    (re.compile(r'(?<=\S)\s+is\s+null\b',                     re.IGNORECASE), ' == NULL '),
+    (re.compile(r'(?<=\S)\s+is\s+zero\b',                     re.IGNORECASE), ' == 0 '),
     # Single-word synonyms. Tightened to require WHITESPACE
     # (or string boundary) on both sides — `\b` alone matches
     # at any word/non-word transition, including code-form
