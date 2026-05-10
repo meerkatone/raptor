@@ -1037,13 +1037,45 @@ class UrllibClient:
 
     @staticmethod
     def _parse_retry_after(value: Optional[str]) -> Optional[int]:
-        """Parse Retry-After header (seconds form only; HTTP-date form ignored)."""
+        """Parse Retry-After header. Both delta-seconds and HTTP-date forms.
+
+        RFC 7231 §7.1.3 defines two grammars: a non-negative integer
+        (``Retry-After: 120``) or an HTTP-date
+        (``Retry-After: Fri, 31 Dec 1999 23:59:59 GMT``). Pre-fix the
+        seconds-only path silently returned None on the date form,
+        which caused the caller's retry loop to fall back to its
+        default backoff schedule — typically much shorter than what
+        the upstream actually wanted. For a 503 from Cloudflare /
+        Akamai (commonly date-form), this triggered the retry storm
+        the header is supposed to prevent.
+
+        Both forms get clamped to [1, 1800] so a malicious /
+        misconfigured upstream can't tie up our connection slot for
+        an arbitrary delay. Negative deltas (legacy behaviour bug)
+        and past dates both clamp to 1.
+        """
         if not value:
             return None
+        s = value.strip()
         try:
-            n = int(value.strip())
-            return max(1, min(n, 1800))  # clamp 1s..30min
+            n = int(s)
+            return max(1, min(n, 1800))
         except ValueError:
+            pass
+        # HTTP-date form — RFC 7231 says the value is in the IMF-fixdate
+        # / obs-date subset of RFC 5322. Use email.utils.parsedate_to_datetime
+        # which handles all three IMF/RFC 850/asctime variants.
+        try:
+            from email.utils import parsedate_to_datetime
+            from datetime import datetime, timezone
+            target = parsedate_to_datetime(s)
+            if target is None:
+                return None
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            delta = (target - datetime.now(timezone.utc)).total_seconds()
+            return max(1, min(int(delta), 1800))
+        except (TypeError, ValueError):
             return None
 
 
